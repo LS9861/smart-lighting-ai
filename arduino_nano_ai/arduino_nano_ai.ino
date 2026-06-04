@@ -1,6 +1,6 @@
 /*
  * Arduino Nano - AI Lighting System with Manual Override
- * Uses existing config.h thresholds
+ * Complete working version with AI display on OLED
  */
 
 #include <Wire.h>
@@ -31,7 +31,8 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_ADDR_ROOM);
 // ============================================
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
-SoftwareSerial espSerial(ESP_RX_PIN, ESP_TX_PIN);
+//SoftwareSerial espSerial(ESP_RX_PIN, ESP_TX_PIN);
+#define espSerial Serial   // Use USB instead of pins 10/11
 
 // ============================================
 // SYSTEM VARIABLES
@@ -46,6 +47,8 @@ bool oledWorking = false;
 char currentTime[6] = "--:--";
 char cityTemp[6] = "--";
 char cityCondition[15] = "Waiting";
+char lastAIDecision[4] = "---";   // Stores last AI decision (ON/OFF/---)
+char cityName[20] = "Stuttgart";  // Default, will be updated by CITY: command
 
 int screenState = 0;
 unsigned long lastScreenSwitch = 0;
@@ -201,6 +204,8 @@ void readSensors() {
   Serial.print(relayState ? "ON" : "OFF");
   Serial.print(F(" Mode: "));
   Serial.print(manualSwitchState ? "MAN" : "AUTO");
+  Serial.print(F(" AI: "));
+  Serial.print(lastAIDecision);
   Serial.print(F(" Temp: "));
   if (lastTemperature != -999) Serial.println(lastTemperature, 1);
   else Serial.println(F("NO SENSOR"));
@@ -238,27 +243,54 @@ void makeLightingDecision() {
 // ============================================
 // ESP32 COMMUNICATION
 // ============================================
+// ============================================
+// ESP32 COMMUNICATION - Using USB Serial
+// ============================================
+// No SoftwareSerial needed - use the USB port directly
+// The simulator will send data over the same USB cable
+
+// ============================================
+// ESP32 COMMUNICATION - UPDATED for City Name
+// ============================================
 void handleESPCommunication() {
-  if (espSerial.available()) {
-    String response = espSerial.readStringUntil('\n');
+  if (Serial.available()) {
+    String response = Serial.readStringUntil('\n');
     response.trim();
     
     if (response.startsWith(F("TIME:"))) {
       response.substring(5).toCharArray(currentTime, 6);
       Serial.print(F("Time: "));
       Serial.println(currentTime);
-    } 
+    }
+    // ========== NEW: Handle CITY command ==========
+    else if (response.startsWith(F("CITY:"))) {
+      String city = response.substring(5);
+      city.toCharArray(cityName, 20);
+      Serial.print(F("📍 City set to: "));
+      Serial.println(cityName);
+    }
+    // ==============================================
     else if (response.startsWith(F("WEATHER:"))) {
       String data = response.substring(8);
       int sep = data.indexOf('|');
       if (sep > 0) {
-        data.substring(0, sep).toCharArray(cityTemp, 6);
-        data.substring(sep + 1).toCharArray(cityCondition, 15);
+        String temp = data.substring(0, sep);
+        String condition = data.substring(sep + 1);
+        temp.toCharArray(cityTemp, 6);
+        condition.toCharArray(cityCondition, 20);
         Serial.print(F("Weather: "));
         Serial.print(cityTemp);
         Serial.print(F("C "));
         Serial.println(cityCondition);
       }
+    }
+    else if (response.startsWith(F("AI:"))) {
+      String decision = response.substring(3);
+      decision.trim();
+      decision.toUpperCase();
+      decision.toCharArray(lastAIDecision, 4);
+      Serial.print(F("🤖 AI Decision: "));
+      Serial.println(lastAIDecision);
     }
   }
 }
@@ -285,7 +317,7 @@ void drawRoomScreen() {
   display.setCursor(0, 0);
   display.print(F("ROOM"));
   
-  // Show time if available
+  // Show time if available (right side)
   if (currentTime[0] != '-') {
     display.setCursor(80, 0);
     display.print(currentTime);
@@ -301,38 +333,44 @@ void drawRoomScreen() {
   }
   display.print(F("C"));
   
-  // Light Status (small, shortened)
+  // Line 4: Combined status line
   display.setTextSize(1);
   display.setCursor(0, 42);
   display.print(F("L:"));
   display.print(lightStatusText);
   
-  // Relay Status
-  display.setCursor(60, 42);
+  // Relay Status (next to light)
+  display.setCursor(55, 42);
   display.print(F("R:"));
   display.print(relayState ? F("ON") : F("OFF"));
   
-  // Mode (bottom line)
-  display.setCursor(0, 56);
+  // Mode (bottom line) - MOVED UP
+  display.setCursor(0, 52);
   if (manualSwitchState) {
-    display.print(F("MODE:MAN"));
+    display.print(F("MODE:MANUAL"));
   } else {
     display.print(F("MODE:AUTO"));
   }
 }
 
 void drawCityScreen() {
-  // Title
+  // LINE 0: City name (left side)
   display.setCursor(0, 0);
-  display.print(F("CITY"));
   
-  // Time
+  // Truncate city name if too long (leave room for time)
+  String cityStr = String(cityName);
+  if (cityStr.length() > 12) {
+    cityStr = cityStr.substring(0, 10) + "..";
+  }
+  display.print(cityStr);
+  
+  // LINE 0: Time (right side) - FIXED POSITION
   if (currentTime[0] != '-') {
-    display.setCursor(80, 0);
+    display.setCursor(85, 0);  // Fixed position at right side
     display.print(currentTime);
   }
   
-  // Temperature (BIG)
+  // Temperature (BIG) - centered
   display.setTextSize(2);
   display.setCursor(0, 20);
   display.print(cityTemp);
@@ -341,11 +379,17 @@ void drawCityScreen() {
   // Weather Condition
   display.setTextSize(1);
   display.setCursor(0, 46);
-  display.print(cityCondition);
+  
+  // Truncate condition if too long
+  String condStr = String(cityCondition);
+  if (condStr.length() > 16) {
+    condStr = condStr.substring(0, 14) + "..";
+  }
+  display.print(condStr);
   
   // Update hint
   display.setCursor(0, 58);
-  display.print(F("Refresh"));
+  display.print(F("Updates:5min"));
 }
 
 // ============================================
@@ -390,6 +434,8 @@ void showStatus() {
   Serial.println(relayState ? F("ON") : F("OFF"));
   Serial.print(F("Mode: "));
   Serial.println(manualSwitchState ? F("MANUAL") : F("AUTO"));
+  Serial.print(F("AI Decision: "));
+  Serial.println(lastAIDecision);
   Serial.print(F("Temp: "));
   if (lastTemperature != -999) {
     Serial.print(lastTemperature, 1);
