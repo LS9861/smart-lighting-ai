@@ -1,5 +1,6 @@
 # Secrets
 secrets.h
+.env
 *.env
 
 # Arduino
