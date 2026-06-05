@@ -1,6 +1,7 @@
 /*
- * Arduino Nano - AI Lighting System with Manual Override
- * Complete working version with AI display on OLED
+ * Arduino Nano - AI Lighting System
+ * TWO Screens: ROOM (Germany) and CITY (User selected)
+ * FIXED: Weather parsing working
  */
 
 #include <Wire.h>
@@ -8,21 +9,10 @@
 #include <Adafruit_GFX.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
-#include <SoftwareSerial.h>
 #include "config.h"
 
 // ============================================
-// Use existing thresholds from config.h
-// ============================================
-#ifndef LIGHT_ON_THRESHOLD
-#define LIGHT_ON_THRESHOLD     LIGHT_DARK_THRESHOLD
-#endif
-#ifndef LIGHT_OFF_THRESHOLD
-#define LIGHT_OFF_THRESHOLD    LIGHT_BRIGHT_THRESHOLD
-#endif
-
-// ============================================
-// OLED DISPLAY (Single OLED)
+// OLED DISPLAY
 // ============================================
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_ADDR_ROOM);
 
@@ -31,29 +21,28 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_ADDR_ROOM);
 // ============================================
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
-//SoftwareSerial espSerial(ESP_RX_PIN, ESP_TX_PIN);
-#define espSerial Serial   // Use USB instead of pins 10/11
 
 // ============================================
 // SYSTEM VARIABLES
 // ============================================
 bool relayState = false;
 int lastLightValue = 0;
-float lastTemperature = 0;
+float lastTemperature = 23.5;
 bool tempSensorFound = false;
 bool manualSwitchState = false;
-bool oledWorking = false;
 
-char currentTime[6] = "--:--";
+// Data from Python/ESP32
+char roomTime[6] = "--:--";
+char cityName[20] = "Stuttgart";
+char cityTime[6] = "--:--";
 char cityTemp[6] = "--";
-char cityCondition[15] = "Waiting";
-char lastAIDecision[4] = "---";   // Stores last AI decision (ON/OFF/---)
-char cityName[20] = "Stuttgart";  // Default, will be updated by CITY: command
+char cityCondition[25] = "Waiting...";
+char lastAIDecision[4] = "---";
 
+// Display state
 int screenState = 0;
 unsigned long lastScreenSwitch = 0;
 unsigned long lastSensorRead = 0;
-unsigned long lastESPRequest = 0;
 
 const char* lightStatusText = "NRM";
 
@@ -62,7 +51,6 @@ const char* lightStatusText = "NRM";
 // ============================================
 void setup() {
   Serial.begin(9600);
-  espSerial.begin(9600);
   
   pinMode(PIN_LDR, INPUT);
   pinMode(PIN_RELAY, OUTPUT);
@@ -71,49 +59,37 @@ void setup() {
   
   // Initialize OLED
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR_ROOM)) {
-    Serial.println(F("OLED not found!"));
-    oledWorking = false;
-  } else {
-    oledWorking = true;
-    display.clearDisplay();
-    display.display();
-    Serial.println(F("OLED ready"));
+    Serial.println(F("OLED failed!"));
+    while (1);
   }
+  
+  display.ssd1306_command(SSD1306_DISPLAYON);
+  display.ssd1306_command(SSD1306_SETCONTRAST);
+  display.ssd1306_command(0xFF);
+  display.clearDisplay();
+  display.display();
   
   // Initialize temperature sensor
   sensors.begin();
-  if (sensors.getDeviceCount() == 0) {
-    tempSensorFound = false;
-    Serial.println(F("No DS18B20 sensor found"));
+  tempSensorFound = (sensors.getDeviceCount() > 0);
+  
+  if (tempSensorFound) {
+    Serial.println(F("✅ DS18B20 found"));
   } else {
-    tempSensorFound = true;
-    Serial.print(F("DS18B20 sensor found. Count: "));
-    Serial.println(sensors.getDeviceCount());
+    Serial.println(F("⚠️ No DS18B20 - using simulated temp"));
   }
   
   Serial.println(F("\n================================="));
   Serial.println(F("AI Lighting System Ready"));
-  Serial.println(F("================================="));
-  Serial.print(F("Light ON: <"));
-  Serial.print(LIGHT_ON_THRESHOLD);
-  Serial.print(F(" OFF: >"));
-  Serial.println(LIGHT_OFF_THRESHOLD);
-  Serial.println(F("Switch D4: ON=Manual, OFF=Auto"));
-  Serial.println(F("Commands: STATUS, TOGGLE, HELP"));
   Serial.println(F("=================================\n"));
   
-  // Show welcome message
-  if (oledWorking) {
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 0);
-    display.print(F("AI Lite"));
-    display.setCursor(0, 20);
-    display.print(F("Ready"));
-    display.display();
-    delay(2000);
-  }
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.print(F("AI Lighting"));
+  display.setCursor(0, 20);
+  display.print(F("Ready..."));
+  display.display();
 }
 
 // ============================================
@@ -130,44 +106,77 @@ void loop() {
     makeLightingDecision();
   }
   
-  if (now - lastESPRequest >= WEATHER_REQUEST_INTERVAL) {
-    lastESPRequest = now;
-    espSerial.println(F("GET_DATA"));
-  }
-  
-  handleESPCommunication();
+  readSerialData();
   
   if (now - lastScreenSwitch >= SCREEN_INTERVAL) {
     lastScreenSwitch = now;
     screenState = (screenState == 0) ? 1 : 0;
   }
   
-  if (oledWorking) {
-    updateDisplay();
-  }
-  
+  updateDisplay();
   handleSerialCommands();
   delay(50);
 }
 
 // ============================================
-// MANUAL SWITCH
+// READ SERIAL DATA - FIXED
 // ============================================
-void checkManualSwitch() {
-  bool switchPressed = (digitalRead(MANUAL_SWITCH_PIN) == LOW);
-  
-  if (switchPressed && !manualSwitchState) {
-    manualSwitchState = true;
-    Serial.println(F("MANUAL MODE: Switch ON"));
-    if (!relayState) {
-      digitalWrite(PIN_RELAY, HIGH);
-      relayState = true;
-      Serial.println(F("Light ON (manual)"));
+void readSerialData() {
+  if (Serial.available()) {
+    String response = Serial.readStringUntil('\n');
+    response.trim();
+    
+    // Debug - see what's coming in
+    Serial.print(F("📨 RX: '"));
+    Serial.print(response);
+    Serial.println(F("'"));
+    
+    if (response.startsWith(F("ROOM_TIME:"))) {
+      response.substring(10).toCharArray(roomTime, 6);
+      Serial.print(F("🏠 Room Time: "));
+      Serial.println(roomTime);
     }
-  } 
-  else if (!switchPressed && manualSwitchState) {
-    manualSwitchState = false;
-    Serial.println(F("AUTO MODE: Switch OFF"));
+    else if (response.startsWith(F("CITY_TIME:"))) {
+      response.substring(10).toCharArray(cityTime, 6);
+      Serial.print(F("🌍 City Time: "));
+      Serial.println(cityTime);
+    }
+    else if (response.startsWith(F("CITY:"))) {
+      response.substring(5).toCharArray(cityName, 20);
+      Serial.print(F("📍 City: "));
+      Serial.println(cityName);
+    }
+    else if (response.startsWith(F("WEATHER:"))) {
+      // Extract after WEATHER:
+      String data = response.substring(8);
+      data.trim();
+      
+      Serial.print(F("🌡️ Weather data: '"));
+      Serial.print(data);
+      Serial.println(F("'"));
+      
+      int sep = data.indexOf('|');
+      if (sep > 0) {
+        String temp = data.substring(0, sep);
+        String condition = data.substring(sep + 1);
+        temp.toCharArray(cityTemp, 6);
+        condition.toCharArray(cityCondition, 25);
+        Serial.print(F("   ✅ Temp: "));
+        Serial.print(cityTemp);
+        Serial.print(F("C Condition: "));
+        Serial.println(cityCondition);
+      } else {
+        Serial.print(F("   ⚠️ No '|' found"));
+      }
+    }
+    else if (response.startsWith(F("AI:"))) {
+      String decision = response.substring(3);
+      decision.trim();
+      decision.toUpperCase();
+      decision.toCharArray(lastAIDecision, 4);
+      Serial.print(F("🤖 AI: "));
+      Serial.println(lastAIDecision);
+    }
   }
 }
 
@@ -177,7 +186,6 @@ void checkManualSwitch() {
 void readSensors() {
   lastLightValue = analogRead(PIN_LDR);
   
-  // Determine light status using thresholds
   if (lastLightValue < LIGHT_ON_THRESHOLD) {
     lightStatusText = "DRK";
   } else if (lastLightValue > LIGHT_OFF_THRESHOLD) {
@@ -186,47 +194,45 @@ void readSensors() {
     lightStatusText = "NRM";
   }
   
-  // Read temperature
   if (tempSensorFound) {
     sensors.requestTemperatures();
-    lastTemperature = sensors.getTempCByIndex(0);
-    if (lastTemperature == -127.0) lastTemperature = -999;
+    delay(100);
+    float temp = sensors.getTempCByIndex(0);
+    if (temp != -127.0 && temp < 100 && temp > -20) {
+      lastTemperature = temp;
+    }
   } else {
-    lastTemperature = -999;
+    // Simulated temperature
+    static float simulatedTemp = 23.5;
+    simulatedTemp += 0.01;
+    if (simulatedTemp > 24.5) simulatedTemp = 22.5;
+    lastTemperature = simulatedTemp;
   }
   
-  // Debug output
   Serial.print(F("Light: "));
   Serial.print(lastLightValue);
   Serial.print(F(" ["));
   Serial.print(lightStatusText);
   Serial.print(F("] Relay: "));
   Serial.print(relayState ? "ON" : "OFF");
-  Serial.print(F(" Mode: "));
-  Serial.print(manualSwitchState ? "MAN" : "AUTO");
   Serial.print(F(" AI: "));
   Serial.print(lastAIDecision);
   Serial.print(F(" Temp: "));
-  if (lastTemperature != -999) Serial.println(lastTemperature, 1);
-  else Serial.println(F("NO SENSOR"));
+  Serial.println(lastTemperature, 1);
 }
 
 // ============================================
-// LIGHTING CONTROL (with hysteresis)
+// LIGHTING CONTROL
 // ============================================
 void makeLightingDecision() {
-  if (manualSwitchState) {
-    return;
-  }
+  if (manualSwitchState) return;
   
   bool shouldLightBeOn = relayState;
   
   if (!relayState && lastLightValue < LIGHT_ON_THRESHOLD) {
     shouldLightBeOn = true;
-    Serial.println(F("→ DARK -> ON"));
   } else if (relayState && lastLightValue > LIGHT_OFF_THRESHOLD) {
     shouldLightBeOn = false;
-    Serial.println(F("→ BRIGHT -> OFF"));
   }
   
   if (shouldLightBeOn && !relayState) {
@@ -241,62 +247,27 @@ void makeLightingDecision() {
 }
 
 // ============================================
-// ESP32 COMMUNICATION
+// MANUAL SWITCH
 // ============================================
-// ============================================
-// ESP32 COMMUNICATION - Using USB Serial
-// ============================================
-// No SoftwareSerial needed - use the USB port directly
-// The simulator will send data over the same USB cable
-
-// ============================================
-// ESP32 COMMUNICATION - UPDATED for City Name
-// ============================================
-void handleESPCommunication() {
-  if (Serial.available()) {
-    String response = Serial.readStringUntil('\n');
-    response.trim();
-    
-    if (response.startsWith(F("TIME:"))) {
-      response.substring(5).toCharArray(currentTime, 6);
-      Serial.print(F("Time: "));
-      Serial.println(currentTime);
+void checkManualSwitch() {
+  bool switchPressed = (digitalRead(MANUAL_SWITCH_PIN) == LOW);
+  
+  if (switchPressed && !manualSwitchState) {
+    manualSwitchState = true;
+    Serial.println(F("MANUAL ON"));
+    if (!relayState) {
+      digitalWrite(PIN_RELAY, HIGH);
+      relayState = true;
     }
-    // ========== NEW: Handle CITY command ==========
-    else if (response.startsWith(F("CITY:"))) {
-      String city = response.substring(5);
-      city.toCharArray(cityName, 20);
-      Serial.print(F("📍 City set to: "));
-      Serial.println(cityName);
-    }
-    // ==============================================
-    else if (response.startsWith(F("WEATHER:"))) {
-      String data = response.substring(8);
-      int sep = data.indexOf('|');
-      if (sep > 0) {
-        String temp = data.substring(0, sep);
-        String condition = data.substring(sep + 1);
-        temp.toCharArray(cityTemp, 6);
-        condition.toCharArray(cityCondition, 20);
-        Serial.print(F("Weather: "));
-        Serial.print(cityTemp);
-        Serial.print(F("C "));
-        Serial.println(cityCondition);
-      }
-    }
-    else if (response.startsWith(F("AI:"))) {
-      String decision = response.substring(3);
-      decision.trim();
-      decision.toUpperCase();
-      decision.toCharArray(lastAIDecision, 4);
-      Serial.print(F("🤖 AI Decision: "));
-      Serial.println(lastAIDecision);
-    }
+  } 
+  else if (!switchPressed && manualSwitchState) {
+    manualSwitchState = false;
+    Serial.println(F("AUTO"));
   }
 }
 
 // ============================================
-// OLED DISPLAY (Optimized for 0.96")
+// OLED DISPLAY
 // ============================================
 void updateDisplay() {
   display.clearDisplay();
@@ -313,77 +284,69 @@ void updateDisplay() {
 }
 
 void drawRoomScreen() {
-  // Line 0: Title (top)
   display.setCursor(0, 0);
   display.print(F("ROOM"));
-  
-  // Show time if available (right side)
-  if (currentTime[0] != '-') {
-    display.setCursor(80, 0);
-    display.print(currentTime);
+  if (roomTime[0] != '-') {
+    display.setCursor(85, 0);
+    display.print(roomTime);
   }
   
-  // Temperature (BIG) - centered
   display.setTextSize(2);
-  display.setCursor(0, 16);
-  if (lastTemperature == -999) {
-    display.print(F("--.-"));
-  } else {
-    display.print(lastTemperature, 1);
-  }
+  display.setCursor(0, 18);
+  display.print(lastTemperature, 1);
   display.print(F("C"));
   
-  // Line 4: Combined status line
   display.setTextSize(1);
-  display.setCursor(0, 42);
+  display.setCursor(0, 44);
   display.print(F("L:"));
   display.print(lightStatusText);
   
-  // Relay Status (next to light)
-  display.setCursor(55, 42);
+  display.setCursor(55, 44);
   display.print(F("R:"));
   display.print(relayState ? F("ON") : F("OFF"));
   
-  // Mode (bottom line) - MOVED UP
-  display.setCursor(0, 52);
-  if (manualSwitchState) {
-    display.print(F("MODE:MANUAL"));
-  } else {
-    display.print(F("MODE:AUTO"));
-  }
+  display.setCursor(0, 54);
+  display.print(F("AI:"));
+  display.print(lastAIDecision);
+  
+  display.setCursor(80, 54);
+  display.print(manualSwitchState ? F("MAN") : F("AUTO"));
 }
 
 void drawCityScreen() {
-  // LINE 0: City name (left side)
-  display.setCursor(0, 0);
-  
-  // Truncate city name if too long (leave room for time)
+  // City name
   String cityStr = String(cityName);
   if (cityStr.length() > 12) {
     cityStr = cityStr.substring(0, 10) + "..";
   }
+  display.setCursor(0, 0);
   display.print(cityStr);
   
-  // LINE 0: Time (right side) - FIXED POSITION
-  if (currentTime[0] != '-') {
-    display.setCursor(85, 0);  // Fixed position at right side
-    display.print(currentTime);
+  // City time
+  if (cityTime[0] != '-') {
+    int timeX = 128 - (strlen(cityTime) * 6);
+    display.setCursor(timeX, 0);
+    display.print(cityTime);
   }
   
-  // Temperature (BIG) - centered
+  // Temperature
   display.setTextSize(2);
-  display.setCursor(0, 20);
-  display.print(cityTemp);
+  display.setCursor(0, 22);
+  
+  if (cityTemp[0] != '-' && atoi(cityTemp) != 0) {
+    display.print(cityTemp);
+  } else {
+    display.print(F("--"));
+  }
   display.print(F("C"));
   
-  // Weather Condition
+  // Weather condition
   display.setTextSize(1);
   display.setCursor(0, 46);
   
-  // Truncate condition if too long
   String condStr = String(cityCondition);
-  if (condStr.length() > 16) {
-    condStr = condStr.substring(0, 14) + "..";
+  if (condStr.length() > 18) {
+    condStr = condStr.substring(0, 16);
   }
   display.print(condStr);
   
@@ -403,55 +366,38 @@ void handleSerialCommands() {
   cmd.toUpperCase();
   
   if (cmd == F("STATUS")) {
-    showStatus();
-  } 
+    Serial.println(F("\n========== STATUS =========="));
+    Serial.print(F("Light: "));
+    Serial.print(lastLightValue);
+    Serial.print(F(" ["));
+    Serial.print(lightStatusText);
+    Serial.println(F("]"));
+    Serial.print(F("Relay: "));
+    Serial.println(relayState ? F("ON") : F("OFF"));
+    Serial.print(F("AI: "));
+    Serial.println(lastAIDecision);
+    Serial.print(F("Room Temp: "));
+    Serial.print(lastTemperature, 1);
+    Serial.println(F("C"));
+    Serial.print(F("City: "));
+    Serial.print(cityName);
+    Serial.print(F(" Time: "));
+    Serial.print(cityTime);
+    Serial.print(F(" Weather: "));
+    Serial.print(cityTemp);
+    Serial.print(F("C "));
+    Serial.println(cityCondition);
+    Serial.println(F("===========================\n"));
+  }
   else if (cmd == F("TOGGLE")) {
     if (!manualSwitchState) {
       relayState = !relayState;
       digitalWrite(PIN_RELAY, relayState ? HIGH : LOW);
-      Serial.print(F("Toggle: Light "));
+      Serial.print(F("Toggle: "));
       Serial.println(relayState ? F("ON") : F("OFF"));
-    } else {
-      Serial.println(F("Turn OFF manual switch first"));
     }
   }
   else if (cmd == F("HELP")) {
-    showHelp();
+    Serial.println(F("Commands: STATUS, TOGGLE, HELP"));
   }
-  else {
-    Serial.println(F("Unknown. Type HELP"));
-  }
-}
-
-void showStatus() {
-  Serial.println(F("\n========== STATUS =========="));
-  Serial.print(F("Light: "));
-  Serial.print(lastLightValue);
-  Serial.print(F(" ["));
-  Serial.print(lightStatusText);
-  Serial.println(F("]"));
-  Serial.print(F("Relay: "));
-  Serial.println(relayState ? F("ON") : F("OFF"));
-  Serial.print(F("Mode: "));
-  Serial.println(manualSwitchState ? F("MANUAL") : F("AUTO"));
-  Serial.print(F("AI Decision: "));
-  Serial.println(lastAIDecision);
-  Serial.print(F("Temp: "));
-  if (lastTemperature != -999) {
-    Serial.print(lastTemperature, 1);
-    Serial.println(F("C"));
-  } else {
-    Serial.println(F("NO SENSOR"));
-  }
-  Serial.println(F("===========================\n"));
-}
-
-void showHelp() {
-  Serial.println(F("\n========== COMMANDS =========="));
-  Serial.println(F("STATUS  - Show status"));
-  Serial.println(F("TOGGLE  - Manual relay (AUTO)"));
-  Serial.println(F("HELP    - This help"));
-  Serial.println(F("\nSwitch ON = Manual"));
-  Serial.println(F("Switch OFF = Auto"));
-  Serial.println(F("============================\n"));
 }
