@@ -19,3 +19,17 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+
+# Logs
+*.log
+
+# Export files
+*.csv
+*.xlsx
