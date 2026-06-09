@@ -1,5 +1,5 @@
 """
-ESP32 Simulator - Working Version with CORRECT AI decision (uses ROOM time)
+ESP32 Simulator - Working Version with CORRECT AI decision (uses ROOM time and SUNSET)
 """
 
 import serial
@@ -19,60 +19,59 @@ BAUD_RATE = 9600
 OPENWEATHER_API_KEY = os.getenv('OPENWEATHER_API_KEY', '')
 
 # ============================================
-# CLOUD API FUNCTION (ADD THIS HERE)
+# CLOUD API FUNCTION
 # ============================================
 
-def send_to_cloud(light_value, light_status, relay_state, mode, ai_decision):
+def send_to_cloud(light_value=None, light_status=None, relay_state=None, mode=None, ai_decision=None, temperature=None, city=None, condition=None, city_time=None):
     """Send real-time data to cloud API"""
     try:
         url = "https://smart-lighting-ai.onrender.com/submit"
-        data = {
-            "light_value": light_value,
-            "light_status": light_status,
-            "relay_state": relay_state,
-            "mode": mode,
-            "ai_decision": ai_decision
-        }
-        response = requests.post(url, json=data, timeout=2)
-        if response.status_code == 200:
-            print(f"   ☁️ Sent to cloud (Light: {light_value})")
-    except Exception as e:
-        pass  # Don't let cloud issues stop the main program
+        data = {}
         
-# Timezone offsets
+        if light_value is not None:
+            data["light_value"] = light_value
+        if light_status is not None:
+            data["light_status"] = light_status
+        if relay_state is not None:
+            data["relay_state"] = relay_state
+        if mode is not None:
+            data["mode"] = mode
+        if ai_decision is not None:
+            data["ai_decision"] = ai_decision
+        if temperature is not None:
+            data["temperature"] = temperature
+        if city is not None:
+            data["city"] = city
+        if condition is not None:
+            data["condition"] = condition
+        if city_time is not None:
+            data["city_time"] = city_time
+        
+        if data:
+            response = requests.post(url, json=data, timeout=2)
+            if response.status_code == 200:
+                if light_value is not None:
+                    print(f"   ☁️ Cloud: Light={light_value}, AI={ai_decision}")
+                elif temperature is not None:
+                    print(f"   ☁️ Cloud: Weather={city} {temperature}°C, {condition}")
+    except Exception as e:
+        pass
+
 # ============================================
-# TIMEZONE OFFSETS BY COUNTRY (not by city!)
+# TIMEZONE OFFSETS BY COUNTRY
 # ============================================
 COUNTRY_OFFSETS = {
-    "NP": 5.75,    # Nepal
-    "DE": 1.0,     # Germany
-    "GB": 0,       # United Kingdom
-    "US": -5,      # USA (Eastern Time)
-    "FR": 1.0,     # France
-    "JP": 9,       # Japan
-    "IN": 5.5,     # India
-    "AU": 10,      # Australia
-    "AE": 4,       # UAE (Dubai)
-    "SG": 8,       # Singapore
-    "CN": 8,       # China
-    "BR": -3,      # Brazil
-    "ZA": 2,       # South Africa
-    "RU": 3,       # Russia (Moscow)
-    "CA": -5,      # Canada (Eastern)
-    "MX": -6,      # Mexico
-    "IT": 1.0,     # Italy
-    "ES": 1.0,     # Spain
-    "TR": 3,       # Turkey
-    "TH": 7,       # Thailand
-    "VN": 7,       # Vietnam
-    "MY": 8,       # Malaysia
-    "PH": 8,       # Philippines
-    "PK": 5,       # Pakistan
-    "BD": 6,       # Bangladesh
-    "LK": 5.5,     # Sri Lanka
+    "NP": 5.75, "DE": 1.0, "GB": 0, "US": -5, "FR": 1.0, "JP": 9,
+    "IN": 5.5, "AU": 10, "AE": 4, "SG": 8, "CN": 8, "BR": -3,
+    "ZA": 2, "RU": 3, "CA": -5, "MX": -6, "IT": 1.0, "ES": 1.0,
+    "TR": 3, "TH": 7, "VN": 7, "MY": 8, "PH": 8, "PK": 5, "BD": 6, "LK": 5.5,
 }
-# Room location offset (Germany)
-ROOM_OFFSET = 1.0  # Germany = UTC+1
+
+simulated_room_temp = 23.5
+
+# ============================================
+# TIME FUNCTIONS
+# ============================================
 
 def get_timezone_from_city(city_name):
     """Automatically get timezone offset by looking up city's country"""
@@ -80,7 +79,6 @@ def get_timezone_from_city(city_name):
         return 1.0
     
     try:
-        # First try to get city info from weather API
         url = f"http://api.openweathermap.org/data/2.5/weather?q={city_name}&appid={OPENWEATHER_API_KEY}&units=metric"
         response = requests.get(url, timeout=10)
         
@@ -88,10 +86,8 @@ def get_timezone_from_city(city_name):
             data = response.json()
             country_code = data['sys']['country']
             city_found = data['name']
-            
             print(f"   📍 Found: {city_found}, {country_code}")
             
-            # Look up country in our dictionary
             if country_code in COUNTRY_OFFSETS:
                 offset = COUNTRY_OFFSETS[country_code]
                 print(f"   🕐 Timezone: UTC+{offset}")
@@ -102,26 +98,26 @@ def get_timezone_from_city(city_name):
         else:
             print(f"   ⚠️ Could not find city '{city_name}'")
             return 1.0
-            
     except Exception as e:
         print(f"   ⚠️ Error: {e}")
         return 1.0
 
-# ============================================
-# FUNCTIONS
-# ============================================
 
-def get_local_time(offset_hours):
-    """Get local time for a timezone offset"""
+def get_room_time():
+    """Get current Germany time from system (handles DST automatically)"""
+    return datetime.now()
+
+
+def get_city_time(city_offset):
+    """Get city time using offset from UTC"""
     utc_now = datetime.now(timezone.utc)
-    hours = int(offset_hours)
-    minutes = int((offset_hours - hours) * 60)
+    hours = int(city_offset)
+    minutes = int((city_offset - hours) * 60)
     local_time = utc_now + timedelta(hours=hours, minutes=minutes)
     return local_time.replace(tzinfo=None)
 
-
 # ============================================
-# NEW: IMPROVED WEATHER FUNCTIONS (Add these)
+# WEATHER FUNCTIONS WITH SUNSET
 # ============================================
 
 def get_city_coordinates(city_name, country_code=None):
@@ -130,7 +126,6 @@ def get_city_coordinates(city_name, country_code=None):
         return None, None
     
     try:
-        # Build search query
         query = city_name
         if country_code:
             query = f"{city_name},{country_code}"
@@ -149,10 +144,10 @@ def get_city_coordinates(city_name, country_code=None):
         else:
             print(f"   ⚠️ Could not find coordinates for '{city_name}'")
             return None, None
-            
     except Exception as e:
         print(f"   ⚠️ Geocoding error: {e}")
         return None, None
+
 
 def get_weather_by_coordinates(lat, lon):
     """Get weather using coordinates (most accurate method)"""
@@ -165,23 +160,27 @@ def get_weather_by_coordinates(lat, lon):
             temp = round(data['main']['temp'])
             condition = data['weather'][0]['description']
             condition = condition[0].upper() + condition[1:]
-            city_name = data.get('name', 'Unknown')
-            print(f"   ✅ Weather: {temp}°C, {condition}")
-            return f"{temp}|{condition}"
+            sunset_timestamp = data['sys']['sunset']
+            sunset_time = datetime.fromtimestamp(sunset_timestamp)
+            sunset_hour = sunset_time.hour
+            sunset_minute = sunset_time.minute
+            print(f"   ✅ Weather: {temp}°C, {condition}, Sunset: {sunset_hour}:{sunset_minute:02d}")
+            return f"{temp}|{condition}|{sunset_hour}|{sunset_minute}"
         else:
-            return "22|Clear sky"
+            return "22|Clear sky|20|0"
     except Exception as e:
         print(f"   ⚠️ Weather error: {e}")
-        return "22|Clear sky"
+        return "22|Clear sky|20|0"
+
 
 def get_weather(city_name):
-    """Get real weather - works for ANY city using multiple methods"""
+    """Get real weather with sunset time"""
     if not OPENWEATHER_API_KEY:
-        return "22|Clear sky"
+        return "22|Clear sky|20|0"
     
     print(f"\n🔍 Looking up weather for '{city_name}'...")
     
-    # METHOD 1: Try direct city name first
+    # Try direct city name first
     try:
         url = f"http://api.openweathermap.org/data/2.5/weather?q={city_name}&appid={OPENWEATHER_API_KEY}&units=metric"
         response = requests.get(url, timeout=10)
@@ -191,92 +190,53 @@ def get_weather(city_name):
             temp = round(data['main']['temp'])
             condition = data['weather'][0]['description']
             condition = condition[0].upper() + condition[1:]
+            sunset_timestamp = data['sys']['sunset']
+            sunset_time = datetime.fromtimestamp(sunset_timestamp)
+            sunset_hour = sunset_time.hour
+            sunset_minute = sunset_time.minute
             print(f"   ✅ Found: {data['name']}, {data['sys']['country']}")
-            return f"{temp}|{condition}"
+            print(f"   🌅 Sunset: {sunset_hour}:{sunset_minute:02d}")
+            return f"{temp}|{condition}|{sunset_hour}|{sunset_minute}"
     except:
         pass
     
-    # METHOD 2: Try with common country codes
-    common_countries = {
-        "nepal": "NP",
-        "germany": "DE",
-        "india": "IN", 
-        "usa": "US",
-        "uk": "GB",
-        "france": "FR",
-        "japan": "JP",
-        "australia": "AU"
-    }
-    
-    city_lower = city_name.lower()
-    for country_name, code in common_countries.items():
-        if country_name in city_lower or city_lower in country_name:
-            try:
-                url = f"http://api.openweathermap.org/data/2.5/weather?q={city_name},{code}&appid={OPENWEATHER_API_KEY}&units=metric"
-                response = requests.get(url, timeout=10)
-                if response.status_code == 200:
-                    data = response.json()
-                    temp = round(data['main']['temp'])
-                    condition = data['weather'][0]['description']
-                    condition = condition[0].upper() + condition[1:]
-                    print(f"   ✅ Found with country code {code}: {data['name']}, {data['sys']['country']}")
-                    return f"{temp}|{condition}"
-            except:
-                pass
-    
-    # METHOD 3: Try Geocoding API (find by coordinates)
-    print(f"   🔍 Trying geocoding for '{city_name}'...")
-    lat, lon = get_city_coordinates(city_name)
-    if lat and lon:
-        return get_weather_by_coordinates(lat, lon)
-    
-    # METHOD 4: If all fails, ask user for country code
-    print(f"   ⚠️ '{city_name}' not found automatically.")
-    country_code = input(f"   Enter country code for {city_name} (e.g., NP, DE, US): ").strip().upper()
-    
-    if country_code:
-        try:
-            url = f"http://api.openweathermap.org/data/2.5/weather?q={city_name},{country_code}&appid={OPENWEATHER_API_KEY}&units=metric"
-            response = requests.get(url, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                temp = round(data['main']['temp'])
-                condition = data['weather'][0]['description']
-                condition = condition[0].upper() + condition[1:]
-                print(f"   ✅ Found: {data['name']}, {data['sys']['country']}")
-                return f"{temp}|{condition}"
-        except:
-            pass
-    
+    # Fallback
     print(f"   ⚠️ Could not find '{city_name}' in weather database")
-    print(f"   Using mock data: 22°C, Clear sky")
-    return "22|Clear sky"
+    print(f"   Using mock data: 22°C, Clear sky, Sunset 20:00")
+    return "22|Clear sky|20|0"
 
 
-# ============================================
-# ORIGINAL get_ai_decision FUNCTION (keep as is)
-# ============================================
-
-def get_ai_decision(light_value, room_time_str, city_time_str, city):
+def get_ai_decision(light_value, room_time_str, city_time_str, city, sunset_hour=None, sunset_minute=None):
     """
-    AI decision based on ROOM time (where Arduino is located)
-    room_time_str: Germany local time (HH:MM)
+    AI decision based on ROOM time and ACTUAL SUNSET time.
+    
+    Logic:
+    - Light should be ON after sunset (when it gets dark)
+    - Light should be OFF during daylight hours
+    - Light sensor provides backup if API fails
     """
     hour = int(room_time_str.split(':')[0])
+    minute = int(room_time_str.split(':')[1])
+    current_time_minutes = hour * 60 + minute
     
-    print(f"   🤔 Decision: Room={room_time_str} | City={city_time_str} | Light={light_value}")
+    # Use actual sunset time from weather API (if available)
+    if sunset_hour is not None:
+        sunset_minutes = sunset_hour * 60 + (sunset_minute or 0)
+        # Turn ON 30 minutes BEFORE sunset (as it starts getting dark)
+        # Turn OFF after sunrise (you can add sunrise logic too)
+        if current_time_minutes >= (sunset_minutes - 30):
+            print(f"      → Sunset at {sunset_hour}:{sunset_minute or 0:02d}, current {room_time_str} - turning ON")
+            return "ON"
+        else:
+            print(f"      → Before sunset ({sunset_hour}:{sunset_minute or 0:02d}), current {room_time_str} - keeping OFF")
+            return "OFF"
     
-    # Night time in Germany (after 6 PM or before 6 AM)
-    if hour >= 18 or hour <= 6:
-        print(f"      → Night in Germany ({room_time_str}) → ON")
-        return "ON"
-    
-    # Day time in Germany - check light sensor
+    # Fallback: Use light sensor if no sunset data
     if light_value < 300:
-        print(f"      → Day but dark (light={light_value}) → ON")
+        print(f"      → Dark detected (light={light_value}), turning ON")
         return "ON"
     
-    print(f"      → Day and bright (light={light_value}) → OFF")
+    print(f"      → Daytime, bright (light={light_value}), turning OFF")
     return "OFF"
 
 # ============================================
@@ -284,8 +244,10 @@ def get_ai_decision(light_value, room_time_str, city_time_str, city):
 # ============================================
 
 def main():
+    global simulated_room_temp
+    
     print("\n" + "=" * 60)
-    print("ESP32 SIMULATOR - AI uses ROOM time (Germany)")
+    print("ESP32 SIMULATOR - AI uses ROOM time + ACTUAL SUNSET")
     print("=" * 60)
     
     # Get city from user
@@ -297,7 +259,7 @@ def main():
     city_lower = city.lower()
     city_offset = get_timezone_from_city(city)
     
-    print(f"\n📍 Room location: Germany (UTC+{ROOM_OFFSET})")
+    print(f"\n📍 Room location: Germany (using system time)")
     print(f"📍 City selected: {city} (UTC+{city_offset})")
     print(f"🔌 COM Port: {ARDUINO_PORT}")
     print("\n" + "=" * 60)
@@ -320,23 +282,35 @@ def main():
     weather = get_weather(city)
     ser.write(f"WEATHER:{weather}\n".encode())
     print(f"📤 Sent: WEATHER:{weather}")
+    
+    # Send weather to cloud
+    if '|' in weather:
+        parts = weather.split('|')
+        temp = float(parts[0])
+        condition = parts[1]
+        send_to_cloud(temperature=temp, city=city, condition=condition)
+    
     time.sleep(0.5)
     
     # Send initial AI decision (using ROOM time)
-    room_time = get_local_time(ROOM_OFFSET)
-    city_time = get_local_time(city_offset)
+    room_time = get_room_time()
+    city_time = get_city_time(city_offset)
     ai = get_ai_decision(500, room_time.strftime("%H:%M"), city_time.strftime("%H:%M"), city)
     ser.write(f"AI:{ai}\n".encode())
     print(f"📤 Sent: AI:{ai}")
     
     print("\n📡 Sending updates...")
-    print("   AI decisions based on GERMANY time (where light is)")
+    print("   AI decisions based on ACTUAL SUNSET time in Germany")
     print("Press Ctrl+C to stop\n")
     
     last_time_sent = 0
     last_weather_sent = 0
     last_ai_sent = 0
     current_light = 500
+    current_relay = "OFF"
+    current_ai = "---"
+    current_sunset_hour = None
+    current_sunset_minute = None
     
     try:
         while True:
@@ -351,16 +325,32 @@ def main():
                         for i, p in enumerate(parts):
                             if p == "Light:" and i+1 < len(parts):
                                 current_light = int(parts[i+1])
-                        # ✅ CORRECT: Call cloud function AFTER the for loop
-                        send_to_cloud(current_light, "NRM", "OFF", "AUTO", "---")
+                            if p == "Relay:" and i+1 < len(parts):
+                                current_relay = parts[i+1]
+                            if p == "AI:" and i+1 < len(parts):
+                                current_ai = parts[i+1]
+                        
+                        # Simulate room temperature variation
+                        simulated_room_temp += 0.01
+                        if simulated_room_temp > 24.5:
+                            simulated_room_temp = 22.5
+                        
+                        # Send to cloud
+                        send_to_cloud(
+                            light_value=current_light, 
+                            light_status="NRM", 
+                            relay_state=current_relay, 
+                            mode="AUTO", 
+                            ai_decision=current_ai,
+                            temperature=round(simulated_room_temp, 1)
+                        )
                 except:
                     pass
-                                     
             
             # Send times (every 30 seconds)
             if now - last_time_sent >= 30:
-                room_time = get_local_time(ROOM_OFFSET)
-                city_time = get_local_time(city_offset)
+                room_time = get_room_time()
+                city_time = get_city_time(city_offset)
                 
                 ser.write(f"ROOM_TIME:{room_time.strftime('%H:%M')}\n".encode())
                 ser.write(f"CITY_TIME:{city_time.strftime('%H:%M')}\n".encode())
@@ -374,15 +364,39 @@ def main():
                 weather = get_weather(city)
                 ser.write(f"WEATHER:{weather}\n".encode())
                 print(f"🌤️ Weather: {weather}")
+                
+                # Parse sunset from weather
+                if '|' in weather:
+                    parts = weather.split('|')
+                    if len(parts) >= 4:
+                        temp = float(parts[0])
+                        condition = parts[1]
+                        current_sunset_hour = int(parts[2])
+                        current_sunset_minute = int(parts[3])
+                        print(f"   🌅 Sunset today: {current_sunset_hour}:{current_sunset_minute:02d}")
+                        
+                        # Send weather to cloud
+                        city_time_obj = get_city_time(city_offset)
+                        city_time_str = city_time_obj.strftime("%H:%M:%S")
+                        send_to_cloud(temperature=temp, city=city, condition=condition, city_time=city_time_str)
+                
                 last_weather_sent = now
             
-            # Send AI decision (every 15 seconds) - using ROOM time!
+            # Send AI decision (every 15 seconds) - based on SUNSET!
             if now - last_ai_sent >= 15:
-                room_time = get_local_time(ROOM_OFFSET)
-                city_time = get_local_time(city_offset)
-                ai = get_ai_decision(current_light, room_time.strftime("%H:%M"), city_time.strftime("%H:%M"), city)
+                room_time = get_room_time()
+                city_time = get_city_time(city_offset)
+                ai = get_ai_decision(
+                    current_light, 
+                    room_time.strftime("%H:%M"), 
+                    city_time.strftime("%H:%M"), 
+                    city,
+                    current_sunset_hour,
+                    current_sunset_minute
+                )
                 ser.write(f"AI:{ai}\n".encode())
                 print(f"🤖 AI Decision: {ai}")
+                current_ai = ai
                 last_ai_sent = now
             
             time.sleep(1)
@@ -391,6 +405,7 @@ def main():
         print("\n\n👋 Stopping simulator")
         ser.close()
         print("✅ Disconnected")
+
 
 if __name__ == "__main__":
     if not OPENWEATHER_API_KEY:
