@@ -32,7 +32,7 @@ class SensorReading(db.Model):
     relay_state = db.Column(db.String(5))
     mode = db.Column(db.String(10))
     ai_decision = db.Column(db.String(5))
-    room_temperature = db.Column(db.Float)  # ← ADDED for room temp
+    room_temperature = db.Column(db.Float)
     
     def to_dict(self):
         return {
@@ -53,6 +53,7 @@ class WeatherData(db.Model):
     city = db.Column(db.String(50))
     temperature = db.Column(db.Float)
     condition = db.Column(db.String(100))
+    city_time = db.Column(db.String(50))
     
     def to_dict(self):
         return {
@@ -60,7 +61,8 @@ class WeatherData(db.Model):
             'timestamp': self.timestamp,
             'city': self.city,
             'temperature': self.temperature,
-            'condition': self.condition
+            'condition': self.condition,
+            'city_time': self.city_time
         }
 
 # ============================================
@@ -97,7 +99,7 @@ def submit_data():
             relay_state=data.get('relay_state', 'OFF'),
             mode=data.get('mode', 'AUTO'),
             ai_decision=data.get('ai_decision', '---'),
-            room_temperature=data.get('temperature')  # ← Store room temp
+            room_temperature=data.get('temperature')
         )
         db.session.add(reading)
         print(f"📊 Saved reading: Light={data.get('light_value')}, Temp={data.get('temperature')}, AI={data.get('ai_decision')}")
@@ -108,7 +110,8 @@ def submit_data():
             timestamp=datetime.now().isoformat(),
             city=data.get('city', 'Unknown'),
             temperature=data.get('temperature'),
-            condition=data.get('condition', '')
+            condition=data.get('condition', ''),
+            city_time=data.get('city_time')
         )
         db.session.add(weather)
         print(f"🌤️ Saved weather: {data.get('city')} {data.get('temperature')}°C, {data.get('condition')}")
