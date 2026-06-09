@@ -114,7 +114,7 @@ def submit_data():
             city_time=data.get('city_time')
         )
         db.session.add(weather)
-        print(f"🌤️ Saved weather: {data.get('city')} {data.get('temperature')}°C, {data.get('condition')}")
+        print(f"🌤️ Saved weather: {data.get('city')} {data.get('temperature')}°C, {data.get('condition')}, Time={data.get('city_time')}")
     
     db.session.commit()
     
@@ -181,6 +181,7 @@ def get_stats():
         'latest_temperature': latest_weather.temperature if latest_weather else None,
         'latest_condition': latest_weather.condition if latest_weather else None,
         'latest_city': latest_weather.city if latest_weather else None,
+        'latest_city_time': latest_weather.city_time if latest_weather else None,
         'latest_light': latest_reading.light_value if latest_reading else None,
         'latest_ai': latest_reading.ai_decision if latest_reading else None,
         'latest_relay': latest_reading.relay_state if latest_reading else None,
@@ -212,7 +213,7 @@ with app.app_context():
     db.create_all()
     print("✅ Database tables created/verified")
     print("   - sensor_readings (with room_temperature)")
-    print("   - weather_data")
+    print("   - weather_data (with city_time)")
 
 # ============================================
 # RUN
