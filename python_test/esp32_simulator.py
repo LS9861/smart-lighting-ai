@@ -18,6 +18,27 @@ ARDUINO_PORT = os.getenv('ARDUINO_PORT', 'COM3')
 BAUD_RATE = 9600
 OPENWEATHER_API_KEY = os.getenv('OPENWEATHER_API_KEY', '')
 
+# ============================================
+# CLOUD API FUNCTION (ADD THIS HERE)
+# ============================================
+
+def send_to_cloud(light_value, light_status, relay_state, mode, ai_decision):
+    """Send real-time data to cloud API"""
+    try:
+        url = "https://smart-lighting-ai.onrender.com/submit"
+        data = {
+            "light_value": light_value,
+            "light_status": light_status,
+            "relay_state": relay_state,
+            "mode": mode,
+            "ai_decision": ai_decision
+        }
+        response = requests.post(url, json=data, timeout=2)
+        if response.status_code == 200:
+            print(f"   ☁️ Sent to cloud (Light: {light_value})")
+    except Exception as e:
+        pass  # Don't let cloud issues stop the main program
+        
 # Timezone offsets
 # ============================================
 # TIMEZONE OFFSETS BY COUNTRY (not by city!)
@@ -330,8 +351,11 @@ def main():
                         for i, p in enumerate(parts):
                             if p == "Light:" and i+1 < len(parts):
                                 current_light = int(parts[i+1])
+                        # ✅ CORRECT: Call cloud function AFTER the for loop
+                        send_to_cloud(current_light, "NRM", "OFF", "AUTO", "---")
                 except:
                     pass
+                                     
             
             # Send times (every 30 seconds)
             if now - last_time_sent >= 30:
