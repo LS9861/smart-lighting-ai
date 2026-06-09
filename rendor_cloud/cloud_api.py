@@ -15,7 +15,7 @@ CORS(app)
 # Database configuration
 database_url = os.environ.get('DATABASE_URL', 'sqlite:///lighting.db')
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS = False
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
 
