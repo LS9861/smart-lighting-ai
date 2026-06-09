@@ -32,6 +32,7 @@ class SensorReading(db.Model):
     relay_state = db.Column(db.String(5))
     mode = db.Column(db.String(10))
     ai_decision = db.Column(db.String(5))
+    room_temperature = db.Column(db.Float)  # ← ADDED for room temp
     
     def to_dict(self):
         return {
@@ -41,7 +42,8 @@ class SensorReading(db.Model):
             'light_status': self.light_status,
             'relay_state': self.relay_state,
             'mode': self.mode,
-            'ai_decision': self.ai_decision
+            'ai_decision': self.ai_decision,
+            'room_temperature': self.room_temperature
         }
 
 class WeatherData(db.Model):
@@ -69,11 +71,12 @@ class WeatherData(db.Model):
 def home():
     return jsonify({
         'name': 'Smart Lighting Cloud API',
-        'version': '1.0',
+        'version': '2.0',
         'endpoints': {
             '/readings': 'GET - Get all sensor readings',
             '/readings/latest': 'GET - Get latest reading',
             '/weather': 'GET - Get weather data',
+            '/weather/latest': 'GET - Get latest weather',
             '/stats': 'GET - Get statistics',
             '/submit': 'POST - Submit sensor data',
             '/dashboard': 'GET - View web dashboard'
@@ -85,6 +88,7 @@ def submit_data():
     """Receive data from your local logger"""
     data = request.json
     
+    # Save sensor reading if light_value is present
     if 'light_value' in data:
         reading = SensorReading(
             timestamp=datetime.now().isoformat(),
@@ -92,12 +96,14 @@ def submit_data():
             light_status=data.get('light_status', 'UNK'),
             relay_state=data.get('relay_state', 'OFF'),
             mode=data.get('mode', 'AUTO'),
-            ai_decision=data.get('ai_decision', '---')
+            ai_decision=data.get('ai_decision', '---'),
+            room_temperature=data.get('temperature')  # ← Store room temp
         )
         db.session.add(reading)
-        db.session.commit()
+        print(f"📊 Saved reading: Light={data.get('light_value')}, Temp={data.get('temperature')}, AI={data.get('ai_decision')}")
     
-    if 'temperature' in data:
+    # Save weather data if temperature is present (and it's from weather, not room)
+    if 'temperature' in data and data.get('temperature') is not None and 'city' in data:
         weather = WeatherData(
             timestamp=datetime.now().isoformat(),
             city=data.get('city', 'Unknown'),
@@ -105,7 +111,9 @@ def submit_data():
             condition=data.get('condition', '')
         )
         db.session.add(weather)
-        db.session.commit()
+        print(f"🌤️ Saved weather: {data.get('city')} {data.get('temperature')}°C, {data.get('condition')}")
+    
+    db.session.commit()
     
     return jsonify({'status': 'success', 'message': 'Data saved'})
 
@@ -131,9 +139,17 @@ def get_weather():
     weather = WeatherData.query.order_by(WeatherData.id.desc()).limit(limit).all()
     return jsonify([w.to_dict() for w in weather])
 
+@app.route('/weather/latest', methods=['GET'])
+def get_latest_weather():
+    """Get the latest weather reading only"""
+    latest = WeatherData.query.order_by(WeatherData.id.desc()).first()
+    if latest:
+        return jsonify(latest.to_dict())
+    return jsonify({'error': 'No weather data yet'})
+
 @app.route('/stats', methods=['GET'])
 def get_stats():
-    """Get statistics"""
+    """Get statistics including latest weather and room temp"""
     total = SensorReading.query.count()
     if total == 0:
         return jsonify({'total': 0})
@@ -142,17 +158,30 @@ def get_stats():
     avg_light = db.session.query(func.avg(SensorReading.light_value)).scalar()
     min_light = db.session.query(func.min(SensorReading.light_value)).scalar()
     max_light = db.session.query(func.max(SensorReading.light_value)).scalar()
+    avg_room_temp = db.session.query(func.avg(SensorReading.room_temperature)).scalar()
     
     ai_on = SensorReading.query.filter_by(ai_decision='ON').count()
     ai_off = SensorReading.query.filter_by(ai_decision='OFF').count()
+    
+    # Get latest weather
+    latest_weather = WeatherData.query.order_by(WeatherData.id.desc()).first()
+    latest_reading = SensorReading.query.order_by(SensorReading.id.desc()).first()
     
     return jsonify({
         'total_readings': total,
         'avg_light': round(avg_light, 1) if avg_light else 0,
         'min_light': min_light or 0,
         'max_light': max_light or 0,
+        'avg_room_temp': round(avg_room_temp, 1) if avg_room_temp else None,
         'ai_on': ai_on,
-        'ai_off': ai_off
+        'ai_off': ai_off,
+        'latest_temperature': latest_weather.temperature if latest_weather else None,
+        'latest_condition': latest_weather.condition if latest_weather else None,
+        'latest_city': latest_weather.city if latest_weather else None,
+        'latest_light': latest_reading.light_value if latest_reading else None,
+        'latest_ai': latest_reading.ai_decision if latest_reading else None,
+        'latest_relay': latest_reading.relay_state if latest_reading else None,
+        'latest_room_temp': latest_reading.room_temperature if latest_reading else None
     })
 
 @app.route('/dashboard', methods=['GET'])
@@ -179,6 +208,8 @@ def dashboard():
 with app.app_context():
     db.create_all()
     print("✅ Database tables created/verified")
+    print("   - sensor_readings (with room_temperature)")
+    print("   - weather_data")
 
 # ============================================
 # RUN
