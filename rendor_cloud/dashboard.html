@@ -415,29 +415,33 @@
             }
         }
 
-        async function updateWeather() {
-            try {
-                const response = await fetch(`${API_BASE}/weather/latest`);
-                const data = await response.json();
-                if (data && !data.error) {
-                    document.getElementById('cityTemp').innerHTML = data.temperature ? `${data.temperature}°C` : '--°C';
-                    document.getElementById('weatherCondition').innerHTML = data.condition || '--';
-                    document.getElementById('cityName').innerHTML = data.city || 'Kathmandu';
-                    // Display city time from API if available
-                    if (data.city_time) {
-                        document.getElementById('cityTime').innerHTML = data.city_time;
-                    } else {
-                        // Fallback: calculate from UTC offset for Kathmandu (UTC+5:45)
-                        const now = new Date();
-                        const utcTime = now.getTime() + (now.getTimezoneOffset() * 60000);
-                        const cityTime = new Date(utcTime + (5.75 * 3600000));
-                        document.getElementById('cityTime').innerHTML = cityTime.toLocaleTimeString();
-                    }
-                }
-            } catch(e) {
-                console.error('Weather update error:', e);
-            }
-        }
+		async function updateWeather() {
+			try {
+				const response = await fetch(`${API_BASE}/weather/latest`);
+				const data = await response.json();
+				if (data && !data.error) {
+					document.getElementById('cityTemp').innerHTML = data.temperature ? `${data.temperature}°C` : '--°C';
+					document.getElementById('weatherCondition').innerHTML = data.condition || '--';
+					document.getElementById('cityName').innerHTML = data.city || 'Kathmandu';
+					
+					// Display city time from API if available (without seconds)
+					if (data.city_time) {
+						// Remove seconds: "22:12:16" becomes "22:12"
+						let cityTimeShort = data.city_time.split(':').slice(0, 2).join(':');
+						document.getElementById('cityTime').innerHTML = cityTimeShort;
+					} else {
+						// Fallback: calculate from UTC offset for Kathmandu (UTC+5:45)
+						const now = new Date();
+						const utcTime = now.getTime() + (now.getTimezoneOffset() * 60000);
+						const cityTime = new Date(utcTime + (5.75 * 3600000));
+						// Also remove seconds from fallback
+						document.getElementById('cityTime').innerHTML = cityTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+					}
+				}
+			} catch(e) {
+				console.error('Weather update error:', e);
+			}
+		}
         
         // Update ONLY room time (browser local time)
         function updateRoomTime() {
