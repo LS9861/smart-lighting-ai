@@ -363,9 +363,6 @@
         let lightChart;
         const API_BASE = "https://smart-lighting-ai.onrender.com";
         
-        // Variable to store city time from API
-        let lastCityTime = "--:--";
-        
         async function fetchStats() {
             try {
                 const response = await fetch(`${API_BASE}/stats`);
@@ -426,12 +423,15 @@
                     document.getElementById('cityTemp').innerHTML = data.temperature ? `${data.temperature}°C` : '--°C';
                     document.getElementById('weatherCondition').innerHTML = data.condition || '--';
                     document.getElementById('cityName').innerHTML = data.city || 'Kathmandu';
-                    
-                    // If the weather endpoint has a timestamp, use it for city time
-                    if (data.timestamp) {
-                        const cityDate = new Date(data.timestamp);
-                        lastCityTime = cityDate.toLocaleTimeString();
-                        document.getElementById('cityTime').innerHTML = lastCityTime;
+                    // Display city time from API if available
+                    if (data.city_time) {
+                        document.getElementById('cityTime').innerHTML = data.city_time;
+                    } else {
+                        // Fallback: calculate from UTC offset for Kathmandu (UTC+5:45)
+                        const now = new Date();
+                        const utcTime = now.getTime() + (now.getTimezoneOffset() * 60000);
+                        const cityTime = new Date(utcTime + (5.75 * 3600000));
+                        document.getElementById('cityTime').innerHTML = cityTime.toLocaleTimeString();
                     }
                 }
             } catch(e) {
@@ -439,26 +439,11 @@
             }
         }
         
-        // Function to update ONLY room time (browser local time)
+        // Update ONLY room time (browser local time)
         function updateRoomTime() {
             const now = new Date();
             const timeStr = now.toLocaleTimeString();
             document.getElementById('roomTime').innerHTML = timeStr;
-        }
-        
-        // Function to update city time (from stored value or calculate from offset)
-        function updateCityTimeDisplay() {
-            // If we have a stored city time from API, use it
-            if (lastCityTime !== "--:--") {
-                document.getElementById('cityTime').innerHTML = lastCityTime;
-            } else {
-                // Fallback: calculate from city offset (Kathmandu = UTC+5:45)
-                // This is a fallback if API doesn't provide time
-                const now = new Date();
-                const utcTime = now.getTime() + (now.getTimezoneOffset() * 60000);
-                const kathmanduTime = new Date(utcTime + (5.75 * 3600000));
-                document.getElementById('cityTime').innerHTML = kathmanduTime.toLocaleTimeString();
-            }
         }
         
         function updateChart(readings) {
@@ -560,9 +545,6 @@
                 updateChart(readings);
                 updateAlerts(readings);
             }
-            
-            // Update city time display after weather data is loaded
-            updateCityTimeDisplay();
         }
         
         // Initial load
