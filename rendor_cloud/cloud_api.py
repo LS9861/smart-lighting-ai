@@ -75,7 +75,8 @@ def home():
             '/readings/latest': 'GET - Get latest reading',
             '/weather': 'GET - Get weather data',
             '/stats': 'GET - Get statistics',
-            '/submit': 'POST - Submit sensor data'
+            '/submit': 'POST - Submit sensor data',
+            '/dashboard': 'GET - View web dashboard'
         }
     })
 
@@ -156,123 +157,20 @@ def get_stats():
 
 @app.route('/dashboard', methods=['GET'])
 def dashboard():
-    """HTML Dashboard"""
-    return '''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Smart Lighting Dashboard</title>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-        <style>
-            body { font-family: 'Segoe UI', Arial, sans-serif; margin: 20px; background: #f0f2f5; }
-            .container { max-width: 1200px; margin: 0 auto; }
-            .card { background: white; border-radius: 10px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-            .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin-bottom: 20px; }
-            .stat { background: #e9ecef; padding: 15px; border-radius: 8px; text-align: center; }
-            .stat-number { font-size: 28px; font-weight: bold; }
-            canvas { max-height: 400px; }
-            button { background: #007bff; color: white; border: none; padding: 8px 16px; border-radius: 5px; cursor: pointer; margin: 5px; }
-            button:hover { background: #0056b3; }
-            pre { background: #f8f9fa; padding: 15px; overflow-x: auto; font-size: 12px; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="card">
-                <h1>📡 Smart Lighting Cloud Dashboard</h1>
-                <p>Real-time monitoring from anywhere</p>
-                <button onclick="refreshData()">🔄 Refresh</button>
-                <button onclick="location.reload()">📊 Reload Charts</button>
-            </div>
-            
-            <div class="stats-grid" id="stats">
-                <div class="stat"><div class="stat-number">--</div><div>Total Readings</div></div>
-                <div class="stat"><div class="stat-number">--</div><div>Avg Light</div></div>
-                <div class="stat"><div class="stat-number">--</div><div>AI ON</div></div>
-                <div class="stat"><div class="stat-number">--</div><div>AI OFF</div></div>
-            </div>
-            
-            <div class="card">
-                <h2>📈 Light Level History</h2>
-                <canvas id="lightChart"></canvas>
-            </div>
-            
-            <div class="card">
-                <h2>📊 Recent Readings</h2>
-                <div id="readings" style="max-height: 300px; overflow-y: auto;">
-                    <pre>Loading...</pre>
-                </div>
-            </div>
-        </div>
-        
-        <script>
-            let lightChart;
-            
-            async function getStats() {
-                const response = await fetch('/stats');
-                const data = await response.json();
-                document.getElementById('stats').innerHTML = `
-                    <div class="stat"><div class="stat-number">${data.total_readings || 0}</div><div>Total Readings</div></div>
-                    <div class="stat"><div class="stat-number">${data.avg_light || 0}</div><div>Avg Light</div></div>
-                    <div class="stat"><div class="stat-number" style="color:#28a745">${data.ai_on || 0}</div><div>AI ON</div></div>
-                    <div class="stat"><div class="stat-number" style="color:#dc3545">${data.ai_off || 0}</div><div>AI OFF</div></div>
-                `;
-            }
-            
-            async function getReadings() {
-                const response = await fetch('/readings?limit=50');
-                const data = await response.json();
-                document.getElementById('readings').innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
-                return data;
-            }
-            
-            async function updateChart() {
-                const response = await fetch('/readings?limit=50');
-                const data = await response.json();
-                
-                if (data.length === 0) return;
-                
-                const labels = data.map(r => new Date(r.timestamp).toLocaleTimeString());
-                const values = data.map(r => r.light_value);
-                
-                if (lightChart) lightChart.destroy();
-                
-                const ctx = document.getElementById('lightChart').getContext('2d');
-                lightChart = new Chart(ctx, {
-                    type: 'line',
-                    data: {
-                        labels: labels.reverse(),
-                        datasets: [{
-                            label: 'Light Level (0-1023)',
-                            data: values.reverse(),
-                            borderColor: '#007bff',
-                            backgroundColor: 'rgba(0,123,255,0.1)',
-                            fill: true,
-                            tension: 0.3
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        plugins: { legend: { position: 'top' } },
-                        scales: { y: { title: { display: true, text: 'Light Value' }, min: 0, max: 1023 } }
-                    }
-                });
-            }
-            
-            async function refreshData() {
-                await getStats();
-                await updateChart();
-                await getReadings();
-            }
-            
-            refreshData();
-            setInterval(refreshData, 30000);
-        </script>
-    </body>
-    </html>
-    '''
+    """Serve the HTML dashboard from external file"""
+    try:
+        with open('dashboard.html', 'r', encoding='utf-8') as f:
+            return f.read()
+    except FileNotFoundError:
+        return """
+        <html>
+        <body>
+            <h1>Dashboard file not found</h1>
+            <p>Please ensure dashboard.html is uploaded to the server.</p>
+            <p><a href="/">Back to API</a></p>
+        </body>
+        </html>
+        """, 404
 
 # ============================================
 # CREATE DATABASE TABLES (MUST run on startup)
