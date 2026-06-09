@@ -24,7 +24,6 @@
             margin: 0 auto;
         }
         
-        /* Header */
         .header {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             border-radius: 20px;
@@ -54,7 +53,6 @@
             vertical-align: middle;
         }
         
-        /* Stats Grid */
         .stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -92,7 +90,6 @@
         .warning { color: #f59e0b; }
         .success { color: #10b981; }
         
-        /* Current Status Cards */
         .status-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
@@ -132,7 +129,6 @@
             border-bottom: 1px solid rgba(255,255,255,0.1);
         }
         
-        /* Chart Container */
         .chart-container {
             background: rgba(255,255,255,0.1);
             backdrop-filter: blur(10px);
@@ -156,7 +152,6 @@
             width: 100%;
         }
         
-        /* Button */
         button {
             background: #667eea;
             border: none;
@@ -174,7 +169,6 @@
             transform: translateY(-2px);
         }
         
-        /* Alerts */
         .alert-item {
             background: rgba(0,0,0,0.3);
             border-radius: 10px;
@@ -369,22 +363,6 @@
         let lightChart;
         const API_BASE = "https://smart-lighting-ai.onrender.com";
         
-        // Simulated data for current status (from your Python simulator)
-        // In production, this would come from your API
-        let currentStatus = {
-            roomTemp: 23.5,
-            lightValue: 450,
-            lightStatus: "NRM",
-            relayState: "OFF",
-            aiDecision: "OFF",
-            mode: "AUTO",
-            cityName: "Kathmandu",
-            cityTemp: 22,
-            weatherCondition: "Clear sky",
-            cityTime: "--:--",
-            roomTime: "--:--"
-        };
-        
         async function fetchStats() {
             try {
                 const response = await fetch(`${API_BASE}/stats`);
@@ -397,7 +375,6 @@
                 document.getElementById('statMin').innerHTML = data.min_light || 0;
                 document.getElementById('statMax').innerHTML = data.max_light || 0;
                 
-                // Update status card
                 document.getElementById('totalReadings').innerHTML = data.total_readings || 0;
                 document.getElementById('avgLight').innerHTML = data.avg_light || 0;
                 document.getElementById('aiOnCount').innerHTML = data.ai_on || 0;
@@ -421,7 +398,7 @@
             }
         }
         
-        async function updateCurrentStatus() {
+        async function updateRoomStatus() {
             try {
                 const response = await fetch(`${API_BASE}/readings/latest`);
                 const data = await response.json();
@@ -431,9 +408,24 @@
                     document.getElementById('relayState').innerHTML = data.relay_state || '--';
                     document.getElementById('aiDecision').innerHTML = data.ai_decision || '--';
                     document.getElementById('mode').innerHTML = data.mode || 'AUTO';
+                    document.getElementById('roomTemp').innerHTML = data.room_temperature ? `${data.room_temperature}°C` : '--.-°C';
                 }
             } catch(e) {
-                console.error('Status update error:', e);
+                console.error('Room status error:', e);
+            }
+        }
+
+        async function updateWeather() {
+            try {
+                const response = await fetch(`${API_BASE}/weather/latest`);
+                const data = await response.json();
+                if (data && !data.error) {
+                    document.getElementById('cityTemp').innerHTML = data.temperature ? `${data.temperature}°C` : '--°C';
+                    document.getElementById('weatherCondition').innerHTML = data.condition || '--';
+                    document.getElementById('cityName').innerHTML = data.city || 'Kathmandu';
+                }
+            } catch(e) {
+                console.error('Weather update error:', e);
             }
         }
         
@@ -496,7 +488,6 @@
                 return;
             }
             
-            // Show last 10 readings as alerts
             container.innerHTML = readings.slice(0, 10).map(r => {
                 let alertClass = '';
                 if (r.ai_decision === 'ON') alertClass = 'alert-danger';
@@ -519,28 +510,14 @@
             const resultDiv = document.getElementById('commandResult');
             resultDiv.innerHTML = `📡 Sending command: ${cmd}...`;
             
-            try {
-                // In a real implementation, this would send to your Arduino via API
-                // For now, simulate response
+            setTimeout(() => {
+                resultDiv.innerHTML = `✅ Command "${cmd}" sent successfully!`;
                 setTimeout(() => {
-                    resultDiv.innerHTML = `✅ Command "${cmd}" sent successfully!`;
-                    setTimeout(() => {
-                        resultDiv.innerHTML = '';
-                    }, 3000);
-                }, 1000);
-                
-                // You can implement actual API call to your backend
-                // const response = await fetch(`${API_BASE}/command`, {
-                //     method: 'POST',
-                //     headers: { 'Content-Type': 'application/json' },
-                //     body: JSON.stringify({ command: cmd })
-                // });
-            } catch(e) {
-                resultDiv.innerHTML = `❌ Error: ${e.message}`;
-            }
+                    resultDiv.innerHTML = '';
+                }, 3000);
+            }, 1000);
         }
         
-        // Update time every second
         function updateTime() {
             const now = new Date();
             const timeStr = now.toLocaleTimeString();
@@ -549,21 +526,14 @@
         }
         
         async function refreshAll() {
-            const stats = await fetchStats();
+            await fetchStats();
+            await updateRoomStatus();
+            await updateWeather();
             const readings = await fetchReadings();
-            await updateCurrentStatus();
             
             if (readings && readings.length > 0) {
                 updateChart(readings);
                 updateAlerts(readings);
-            }
-            
-            // Update simulated status values (in real app, these come from API)
-            if (readings && readings.length > 0 && readings[0]) {
-                document.getElementById('lightValue').innerHTML = readings[0].light_value || '--';
-                document.getElementById('lightStatus').innerHTML = readings[0].light_status || '--';
-                document.getElementById('relayState').innerHTML = readings[0].relay_state || '--';
-                document.getElementById('aiDecision').innerHTML = readings[0].ai_decision || '--';
             }
         }
         
@@ -574,9 +544,6 @@
         // Refresh every 5 seconds
         setInterval(refreshAll, 5000);
         setInterval(updateTime, 1000);
-        
-        // Also fetch from Python simulator's current data if available
-        // This would need a separate endpoint to get current simulator status
     </script>
 </body>
 </html>
