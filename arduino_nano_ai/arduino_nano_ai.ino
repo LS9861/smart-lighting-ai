@@ -1,7 +1,6 @@
 /*
- * Arduino Nano - AI Lighting System
- * TWO Screens: ROOM (Germany) and CITY (User selected)
- * FIXED: Weather parsing working
+ * Arduino Uno - AI Lighting System
+ * FIXED: Weather condition display
  */
 
 #include <Wire.h>
@@ -9,7 +8,13 @@
 #include <Adafruit_GFX.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include <SoftwareSerial.h>
 #include "config.h"
+
+// ============================================
+// SOFTWARE SERIAL - ESP32 on pins 10 and 11
+// ============================================
+SoftwareSerial espSerial(10, 11);
 
 // ============================================
 // OLED DISPLAY
@@ -23,6 +28,22 @@ OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 
 // ============================================
+// BINARY PACKET STRUCTURE
+// ============================================
+struct Packet {
+  byte startByte;
+  byte roomHour;
+  byte roomMinute;
+  byte cityHour;
+  byte cityMinute;
+  char cityName[15];
+  byte temperature;
+  byte aiDecision;
+  char weatherCondition[10];
+  byte endByte;
+};
+
+// ============================================
 // SYSTEM VARIABLES
 // ============================================
 bool relayState = false;
@@ -31,19 +52,16 @@ float lastTemperature = 23.5;
 bool tempSensorFound = false;
 bool manualSwitchState = false;
 
-// Data from Python/ESP32
 char roomTime[6] = "--:--";
-char cityName[20] = "Stuttgart";
+char cityName[20] = "Kathmandu";
 char cityTime[6] = "--:--";
 char cityTemp[6] = "--";
 char cityCondition[25] = "Waiting...";
 char lastAIDecision[4] = "---";
 
-// Display state
 int screenState = 0;
 unsigned long lastScreenSwitch = 0;
 unsigned long lastSensorRead = 0;
-
 const char* lightStatusText = "NRM";
 
 // ============================================
@@ -51,13 +69,17 @@ const char* lightStatusText = "NRM";
 // ============================================
 void setup() {
   Serial.begin(9600);
+  espSerial.begin(9600);
+  
+  while (espSerial.available()) {
+    espSerial.read();
+  }
   
   pinMode(PIN_LDR, INPUT);
   pinMode(PIN_RELAY, OUTPUT);
   pinMode(MANUAL_SWITCH_PIN, INPUT_PULLUP);
   digitalWrite(PIN_RELAY, LOW);
   
-  // Initialize OLED
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR_ROOM)) {
     Serial.println(F("OLED failed!"));
     while (1);
@@ -69,15 +91,8 @@ void setup() {
   display.clearDisplay();
   display.display();
   
-  // Initialize temperature sensor
   sensors.begin();
   tempSensorFound = (sensors.getDeviceCount() > 0);
-  
-  if (tempSensorFound) {
-    Serial.println(F("✅ DS18B20 found"));
-  } else {
-    Serial.println(F("⚠️ No DS18B20 - using simulated temp"));
-  }
   
   Serial.println(F("\n================================="));
   Serial.println(F("AI Lighting System Ready"));
@@ -106,7 +121,7 @@ void loop() {
     makeLightingDecision();
   }
   
-  readSerialData();
+  readESP32Data();
   
   if (now - lastScreenSwitch >= SCREEN_INTERVAL) {
     lastScreenSwitch = now;
@@ -119,63 +134,57 @@ void loop() {
 }
 
 // ============================================
-// READ SERIAL DATA - FIXED
+// READ ESP32 DATA
 // ============================================
-void readSerialData() {
-  if (Serial.available()) {
-    String response = Serial.readStringUntil('\n');
-    response.trim();
+void readESP32Data() {
+  if (espSerial.available() >= sizeof(Packet)) {
+    byte buffer[sizeof(Packet)];
     
-    // Debug - see what's coming in
-    Serial.print(F("📨 RX: '"));
-    Serial.print(response);
-    Serial.println(F("'"));
+    for (int i = 0; i < sizeof(Packet); i++) {
+      buffer[i] = espSerial.read();
+    }
     
-    if (response.startsWith(F("ROOM_TIME:"))) {
-      response.substring(10).toCharArray(roomTime, 6);
-      Serial.print(F("🏠 Room Time: "));
-      Serial.println(roomTime);
-    }
-    else if (response.startsWith(F("CITY_TIME:"))) {
-      response.substring(10).toCharArray(cityTime, 6);
-      Serial.print(F("🌍 City Time: "));
-      Serial.println(cityTime);
-    }
-    else if (response.startsWith(F("CITY:"))) {
-      response.substring(5).toCharArray(cityName, 20);
-      Serial.print(F("📍 City: "));
-      Serial.println(cityName);
-    }
-    else if (response.startsWith(F("WEATHER:"))) {
-      // Extract after WEATHER:
-      String data = response.substring(8);
-      data.trim();
+    if (buffer[0] == 0xAA && buffer[sizeof(Packet) - 1] == 0xBB) {
+      Packet* pkt = (Packet*)buffer;
       
-      Serial.print(F("🌡️ Weather data: '"));
-      Serial.print(data);
-      Serial.println(F("'"));
+      sprintf(roomTime, "%02d:%02d", pkt->roomHour, pkt->roomMinute);
+      sprintf(cityTime, "%02d:%02d", pkt->cityHour, pkt->cityMinute);
       
-      int sep = data.indexOf('|');
-      if (sep > 0) {
-        String temp = data.substring(0, sep);
-        String condition = data.substring(sep + 1);
-        temp.toCharArray(cityTemp, 6);
-        condition.toCharArray(cityCondition, 25);
-        Serial.print(F("   ✅ Temp: "));
-        Serial.print(cityTemp);
-        Serial.print(F("C Condition: "));
-        Serial.println(cityCondition);
-      } else {
-        Serial.print(F("   ⚠️ No '|' found"));
+      // Copy city name
+      memset(cityName, 0, sizeof(cityName));
+      for (int i = 0; i < 14 && i < sizeof(pkt->cityName); i++) {
+        cityName[i] = pkt->cityName[i];
       }
-    }
-    else if (response.startsWith(F("AI:"))) {
-      String decision = response.substring(3);
-      decision.trim();
-      decision.toUpperCase();
-      decision.toCharArray(lastAIDecision, 4);
-      Serial.print(F("🤖 AI: "));
-      Serial.println(lastAIDecision);
+      cityName[14] = '\0';
+      
+      // Temperature
+      float temp = pkt->temperature / 10.0;
+      dtostrf(temp, 4, 1, cityTemp);
+      
+      // Copy weather condition - FIXED
+      memset(cityCondition, 0, sizeof(cityCondition));
+      for (int i = 0; i < 9 && i < sizeof(pkt->weatherCondition); i++) {
+        cityCondition[i] = pkt->weatherCondition[i];
+      }
+      cityCondition[9] = '\0';
+      
+      // If empty, use default
+      if (cityCondition[0] == '\0' || cityCondition[0] == ' ') {
+        strcpy(cityCondition, "Clear sky");
+      }
+      
+      if (pkt->aiDecision == 1) {
+        strcpy(lastAIDecision, "ON");
+      } else {
+        strcpy(lastAIDecision, "OFF");
+      }
+      
+      Serial.print("📨 ");
+      Serial.print(cityName);
+      Serial.print(" | ");
+      Serial.print(cityCondition);
+      Serial.print(" | ");
+      Serial.println(cityTemp);
     }
   }
 }
@@ -202,7 +211,6 @@ void readSensors() {
       lastTemperature = temp;
     }
   } else {
-    // Simulated temperature
     static float simulatedTemp = 23.5;
     simulatedTemp += 0.01;
     if (simulatedTemp > 24.5) simulatedTemp = 22.5;
@@ -229,20 +237,26 @@ void makeLightingDecision() {
   
   bool shouldLightBeOn = relayState;
   
-  if (!relayState && lastLightValue < LIGHT_ON_THRESHOLD) {
+  if (strcmp(lastAIDecision, "ON") == 0) {
     shouldLightBeOn = true;
-  } else if (relayState && lastLightValue > LIGHT_OFF_THRESHOLD) {
+  } else if (strcmp(lastAIDecision, "OFF") == 0) {
     shouldLightBeOn = false;
+  } else {
+    if (!relayState && lastLightValue < LIGHT_ON_THRESHOLD) {
+      shouldLightBeOn = true;
+    } else if (relayState && lastLightValue > LIGHT_OFF_THRESHOLD) {
+      shouldLightBeOn = false;
+    }
   }
   
   if (shouldLightBeOn && !relayState) {
     digitalWrite(PIN_RELAY, HIGH);
     relayState = true;
-    Serial.println(F("LIGHT ON"));
+    Serial.println(F("🔦 LIGHT ON"));
   } else if (!shouldLightBeOn && relayState) {
     digitalWrite(PIN_RELAY, LOW);
     relayState = false;
-    Serial.println(F("LIGHT OFF"));
+    Serial.println(F("💡 LIGHT OFF"));
   }
 }
 
@@ -254,7 +268,7 @@ void checkManualSwitch() {
   
   if (switchPressed && !manualSwitchState) {
     manualSwitchState = true;
-    Serial.println(F("MANUAL ON"));
+    Serial.println(F("🔧 MANUAL ON"));
     if (!relayState) {
       digitalWrite(PIN_RELAY, HIGH);
       relayState = true;
@@ -262,7 +276,7 @@ void checkManualSwitch() {
   } 
   else if (!switchPressed && manualSwitchState) {
     manualSwitchState = false;
-    Serial.println(F("AUTO"));
+    Serial.println(F("🔄 AUTO"));
   }
 }
 
@@ -313,14 +327,17 @@ void drawRoomScreen() {
   display.print(manualSwitchState ? F("MAN") : F("AUTO"));
 }
 
+// ============================================
+// DRAW CITY SCREEN
+// ============================================
 void drawCityScreen() {
   // City name
-  String cityStr = String(cityName);
-  if (cityStr.length() > 12) {
-    cityStr = cityStr.substring(0, 10) + "..";
-  }
   display.setCursor(0, 0);
-  display.print(cityStr);
+  if (cityName[0] != '\0' && cityName[0] != ' ') {
+    display.print(cityName);
+  } else {
+    display.print(F("Kathmandu"));
+  }
   
   // City time
   if (cityTime[0] != '-') {
@@ -332,8 +349,7 @@ void drawCityScreen() {
   // Temperature
   display.setTextSize(2);
   display.setCursor(0, 22);
-  
-  if (cityTemp[0] != '-' && atoi(cityTemp) != 0) {
+  if (cityTemp[0] != '-' && cityTemp[0] != '\0') {
     display.print(cityTemp);
   } else {
     display.print(F("--"));
@@ -344,15 +360,23 @@ void drawCityScreen() {
   display.setTextSize(1);
   display.setCursor(0, 46);
   
-  String condStr = String(cityCondition);
-  if (condStr.length() > 18) {
-    condStr = condStr.substring(0, 16);
+  // Check if weather condition has valid text
+  bool hasValidText = false;
+  for (int i = 0; i < 10 && cityCondition[i] != '\0'; i++) {
+    if (cityCondition[i] >= 'A' && cityCondition[i] <= 'z') {
+      hasValidText = true;
+      break;
+    }
   }
-  display.print(condStr);
   
-  // Update hint
+  if (hasValidText) {
+    display.print(cityCondition);
+  } else {
+    display.print(F("Clear sky"));
+  }
+  
   display.setCursor(0, 58);
-  display.print(F("Updates:5min"));
+  display.print(F("ESP32"));
 }
 
 // ============================================
@@ -376,7 +400,7 @@ void handleSerialCommands() {
     Serial.println(relayState ? F("ON") : F("OFF"));
     Serial.print(F("AI: "));
     Serial.println(lastAIDecision);
-    Serial.print(F("Room Temp: "));
+    Serial.print(F("Temp: "));
     Serial.print(lastTemperature, 1);
     Serial.println(F("C"));
     Serial.print(F("City: "));
