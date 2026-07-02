@@ -1,6 +1,6 @@
 /*
  * ESP32-C3 - Master Controller
- * FIXED: Forces display update on startup
+ * FULL WEATHER DISPLAY - Two lines for long conditions
  */
 
 #include <WiFi.h>
@@ -36,7 +36,7 @@ char roomTime[6] = "--:--";
 char cityName[20] = "Kathmandu";
 char cityTime[6] = "--:--";
 char cityTemp[6] = "--";
-char cityCondition[25] = "Waiting...";
+char cityCondition[35] = "Waiting...";
 char lastAIDecision[4] = "---";
 
 int screenState = 0;
@@ -44,8 +44,13 @@ unsigned long lastScreenSwitch = 0;
 unsigned long lastSensorRead = 0;
 const char* lightStatusText = "NRM";
 
-int sunriseHour = 6, sunriseMinute = 0;
-int sunsetHour = 18, sunsetMinute = 0;
+// GERMANY (Room) - For AI decision
+String roomCity = "Berlin";
+int roomSunriseHour = 6, roomSunriseMinute = 0;
+int roomSunsetHour = 18, roomSunsetMinute = 0;
+
+// KATHMANDU (City) - For display only
+String displayCity = "Kathmandu";
 
 bool wifiConnected = false;
 bool manualMode = false;
@@ -55,11 +60,6 @@ String relayStatus = "0";
 const long GMT_OFFSET_SEC = 3600;
 const int DAYLIGHT_OFFSET_SEC = 3600;
 
-// ==========================================
-// TRACK LAST DISPLAYED VALUES
-// ==========================================
-String lastDisplayedMode = "";
-
 void setup() {
   Serial.begin(115200);
   Serial1.begin(9600, SERIAL_8N1, 20, 21);
@@ -68,8 +68,16 @@ void setup() {
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
     while (1);
   }
+  
   display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("ESP32 Starting...");
   display.display();
+  delay(500);
+  
+  display.ssd1306_command(SSD1306_DISPLAYON);
   
   sensors.begin();
   tempSensorFound = (sensors.getDeviceCount() > 0);
@@ -84,27 +92,33 @@ void setup() {
   if (WiFi.status() == WL_CONNECTED) {
     wifiConnected = true;
     configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, "pool.ntp.org");
-    getWeather();
+    getWeather(roomCity, true);
+    getWeather(displayCity, false);
   } else {
     wifiConnected = false;
-    sunriseHour = 6;
-    sunriseMinute = 0;
-    sunsetHour = 18;
-    sunsetMinute = 0;
+    roomSunriseHour = 6;
+    roomSunriseMinute = 0;
+    roomSunsetHour = 18;
+    roomSunsetMinute = 0;
   }
   
   getTimes();
   updateAI();
   
+  display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
-  display.print(wifiConnected ? "Ready" : "FALLBACK");
+  display.println(wifiConnected ? "Ready - WiFi OK" : "FALLBACK MODE");
   display.display();
   
   lastScreenSwitch = millis();
   
   Serial.println("ESP32 Ready");
+  Serial.print("Room (Germany): ");
+  Serial.println(roomCity);
+  Serial.print("Display (City): ");
+  Serial.println(displayCity);
 }
 
 void loop() {
@@ -115,6 +129,8 @@ void loop() {
     if (!wifiConnected) {
       wifiConnected = true;
       configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, "pool.ntp.org");
+      getWeather(roomCity, true);
+      getWeather(displayCity, false);
     }
   } else {
     if (wifiConnected) {
@@ -122,9 +138,7 @@ void loop() {
     }
   }
   
-  // ==========================================
-  // READ ARDUINO STATUS
-  // ==========================================
+  // Read Arduino status
   if (Serial1.available()) {
     String msg = Serial1.readStringUntil('\n');
     msg.trim();
@@ -139,15 +153,6 @@ void loop() {
       else if (ldrStatus == "B") lightStatusText = "BRT";
       else lightStatusText = "NRM";
       
-      // ==========================================
-      // FORCE DISPLAY UPDATE ON STATUS CHANGE
-      // ==========================================
-      String currentMode = manualMode ? "MAN" : (wifiConnected ? "AUTO" : "FALLBACK");
-      if (currentMode != lastDisplayedMode) {
-        lastDisplayedMode = currentMode;
-        updateDisplay();  // Force update
-      }
-      
       Serial.print("📥 ");
       Serial.print("LDR:");
       Serial.print(ldrStatus);
@@ -155,7 +160,6 @@ void loop() {
       Serial.print(manualMode ? "ON" : "OFF");
       Serial.print(" | RLY:");
       Serial.println(relayState ? "ON" : "OFF");
-      
     }
   }
   
@@ -188,78 +192,28 @@ void loop() {
   if (now - lastScreenSwitch >= SCREEN_INTERVAL) {
     lastScreenSwitch = now;
     screenState = (screenState == 0) ? 1 : 0;
-    updateDisplay();  // Force update on screen switch
   }
   
-  // Update weather
+  // Update weather every 5 minutes
   static unsigned long lastWeatherUpdate = 0;
   if (wifiConnected && (now - lastWeatherUpdate >= 300000)) {
     lastWeatherUpdate = now;
-    getWeather();
+    getWeather(roomCity, true);
+    getWeather(displayCity, false);
     updateAI();
   }
   
-  // ==========================================
-  // UPDATE DISPLAY EVERY 2 SECONDS (to show changes)
-  // ==========================================
-  static unsigned long lastDisplayUpdate = 0;
-  if (millis() - lastDisplayUpdate >= 2000) {
-    lastDisplayUpdate = millis();
-    updateDisplay();
-  }
+  // Update display
+  updateDisplay();
   
   delay(50);
 }
 
-void updateAI() {
-  if (manualMode) {
-    Serial.println("🔧 MANUAL MODE - AI disabled");
-    return;
-  }
-  
-  bool isDark = (ldrStatus == "D");
-  
-  if (!wifiConnected) {
-    strcpy(lastAIDecision, isDark ? "ON" : "OFF");
-    return;
-  }
-  
-  struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) {
-    strcpy(lastAIDecision, isDark ? "ON" : "OFF");
-    return;
-  }
-  
-  int current = timeinfo.tm_hour * 60 + timeinfo.tm_min;
-  int sunrise = sunriseHour * 60 + sunriseMinute;
-  int sunset = sunsetHour * 60 + sunsetMinute;
-  
-  bool isNight = (current < sunrise || current >= sunset);
-  strcpy(lastAIDecision, isNight ? "ON" : "OFF");
-  
-  Serial.print("🧠 AI: ");
-  Serial.println(lastAIDecision);
-}
-
-void sendRelayCommand() {
-  if (manualMode) {
-    return;
-  }
-  
-  static char lastSent[4] = "";
-  if (strcmp(lastAIDecision, lastSent) != 0) {
-    strcpy(lastSent, lastAIDecision);
-    Serial1.println(lastAIDecision);
-    Serial.print("📤 Sent: ");
-    Serial.println(lastAIDecision);
-  }
-}
-
-void getWeather() {
+void getWeather(String city, bool isRoom) {
   if (WiFi.status() != WL_CONNECTED) return;
   
   String url = "http://api.openweathermap.org/data/2.5/weather?q=" + 
-               String(cityName) + "&units=metric&appid=" + OPENWEATHER_API_KEY;
+               city + "&units=metric&appid=" + OPENWEATHER_API_KEY;
   
   HTTPClient http;
   http.begin(url);
@@ -270,22 +224,118 @@ void getWeather() {
     JsonDocument doc;
     deserializeJson(doc, payload);
     
-    float temp = doc["main"]["temp"];
-    dtostrf(temp, 4, 1, cityTemp);
-    String cond = doc["weather"][0]["description"].as<String>();
-    if (cond.length() > 10) cond = cond.substring(0, 10);
-    strcpy(cityCondition, cond.c_str());
+    if (isRoom) {
+      long tz = doc["timezone"].as<long>();
+      long sr = doc["sys"]["sunrise"].as<long>() + tz;
+      long ss = doc["sys"]["sunset"].as<long>() + tz;
+      
+      roomSunriseHour = (sr % 86400) / 3600;
+      roomSunriseMinute = ((sr % 86400) % 3600) / 60;
+      roomSunsetHour = (ss % 86400) / 3600;
+      roomSunsetMinute = ((ss % 86400) % 3600) / 60;
+      
+      Serial.println("=================================");
+      Serial.print("🇩🇪 GERMANY (Room) - Sunrise/Sunset:");
+      Serial.print("  Sunrise: ");
+      Serial.print(roomSunriseHour);
+      Serial.print(":");
+      if (roomSunriseMinute < 10) Serial.print("0");
+      Serial.println(roomSunriseMinute);
+      Serial.print("  Sunset: ");
+      Serial.print(roomSunsetHour);
+      Serial.print(":");
+      if (roomSunsetMinute < 10) Serial.print("0");
+      Serial.println(roomSunsetMinute);
+      Serial.println("=================================");
+      
+    } else {
+      float temp = doc["main"]["temp"];
+      dtostrf(temp, 4, 1, cityTemp);
+      String cond = doc["weather"][0]["description"].as<String>();
+      
+      // Store FULL condition (no truncation)
+      strcpy(cityCondition, cond.c_str());
+      
+      Serial.print("🇳🇵 KATHMANDU (City) - Weather: ");
+      Serial.print(cityTemp);
+      Serial.print("°C ");
+      Serial.println(cityCondition);
+    }
     
-    long tz = doc["timezone"].as<long>();
-    long sr = doc["sys"]["sunrise"].as<long>() + tz;
-    long ss = doc["sys"]["sunset"].as<long>() + tz;
+  } else {
+    Serial.print("❌ Weather API error for ");
+    Serial.print(city);
+    Serial.print(": ");
+    Serial.println(httpCode);
     
-    sunriseHour = (sr % 86400) / 3600;
-    sunriseMinute = ((sr % 86400) % 3600) / 60;
-    sunsetHour = (ss % 86400) / 3600;
-    sunsetMinute = ((ss % 86400) % 3600) / 60;
+    if (isRoom) {
+      roomSunriseHour = 6;
+      roomSunriseMinute = 0;
+      roomSunsetHour = 21;
+      roomSunsetMinute = 30;
+    }
   }
   http.end();
+}
+
+void updateAI() {
+  if (manualMode) {
+    Serial.println("🔧 MANUAL MODE - AI disabled");
+    return;
+  }
+  
+  if (!wifiConnected) {
+    strcpy(lastAIDecision, (ldrStatus == "D") ? "ON" : "OFF");
+    return;
+  }
+  
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    strcpy(lastAIDecision, (ldrStatus == "D") ? "ON" : "OFF");
+    return;
+  }
+  
+  int current = timeinfo.tm_hour * 60 + timeinfo.tm_min;
+  int sunrise = roomSunriseHour * 60 + roomSunriseMinute;
+  int sunset = roomSunsetHour * 60 + roomSunsetMinute;
+  
+  bool isNight = (current < sunrise || current >= sunset);
+  
+  if (isNight) {
+    strcpy(lastAIDecision, "ON");
+    Serial.print("🌙 NIGHTTIME - AI: ON");
+  } else {
+    strcpy(lastAIDecision, "OFF");
+    Serial.print("☀️ DAYTIME - AI: OFF");
+  }
+  
+  Serial.print(" | Time: ");
+  Serial.print(timeinfo.tm_hour);
+  Serial.print(":");
+  if (timeinfo.tm_min < 10) Serial.print("0");
+  Serial.print(timeinfo.tm_min);
+  Serial.print(" | Sunrise: ");
+  Serial.print(roomSunriseHour);
+  Serial.print(":");
+  if (roomSunriseMinute < 10) Serial.print("0");
+  Serial.print(roomSunriseMinute);
+  Serial.print(" | Sunset: ");
+  Serial.print(roomSunsetHour);
+  Serial.print(":");
+  if (roomSunsetMinute < 10) Serial.print("0");
+  Serial.println(roomSunsetMinute);
+}
+
+void sendRelayCommand() {
+  if (manualMode) return;
+  
+  static char lastSent[4] = "";
+  if (strcmp(lastAIDecision, lastSent) != 0) {
+    strcpy(lastSent, lastAIDecision);
+    Serial1.println(lastAIDecision);
+    Serial.print("📤 Sent to Uno: ");
+    Serial.println(lastAIDecision);
+  }
 }
 
 void getTimes() {
@@ -307,11 +357,15 @@ void getTimes() {
 }
 
 void updateDisplay() {
+  display.ssd1306_command(SSD1306_DISPLAYON);
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   
   if (screenState == 0) {
+    // ==========================================
+    // ROOM SCREEN - Germany
+    // ==========================================
     display.setCursor(0, 0);
     display.print("ROOM");
     if (roomTime[0] != '-') {
@@ -346,8 +400,11 @@ void updateDisplay() {
     }
     
   } else {
+    // ==========================================
+    // CITY SCREEN - Kathmandu with FULL weather
+    // ==========================================
     display.setCursor(0, 0);
-    display.print(cityName);
+    display.print(displayCity);
     if (cityTime[0] != '-') {
       int x = 128 - (strlen(cityTime) * 6);
       display.setCursor(x, 0);
@@ -363,11 +420,45 @@ void updateDisplay() {
     }
     display.print("C");
     
+    // ==========================================
+    // WEATHER CONDITION - FULL TEXT (2 lines)
+    // ==========================================
     display.setTextSize(1);
-    display.setCursor(0, 46);
-    display.print(cityCondition);
-    display.setCursor(0, 58);
-    display.print(wifiConnected ? "ESP32" : "OFFLINE");
+    String condStr = String(cityCondition);
+    condStr.trim();
+    
+    if (condStr.length() > 20) {
+      // Split at first space near the middle
+      int splitPos = 16;
+      for (int i = 10; i < condStr.length() && i < 20; i++) {
+        if (condStr.charAt(i) == ' ') {
+          splitPos = i;
+          break;
+        }
+      }
+      
+      String line1 = condStr.substring(0, splitPos);
+      String line2 = condStr.substring(splitPos + 1);
+      
+      // If line2 is still too long, truncate
+      if (line2.length() > 18) {
+        line2 = line2.substring(0, 18);
+      }
+      
+      display.setCursor(0, 46);
+      display.print(line1);
+      display.setCursor(0, 54);
+      display.print(line2);
+      
+    } else {
+      // Short weather - one line
+      display.setCursor(0, 46);
+      display.print(condStr);
+      // Show ESP32 status on second line if weather is short
+      display.setCursor(0, 54);
+      display.print(wifiConnected ? "ESP32" : "OFFLINE");
+    }
   }
+  
   display.display();
 }
