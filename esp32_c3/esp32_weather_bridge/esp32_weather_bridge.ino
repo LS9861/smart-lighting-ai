@@ -1,130 +1,265 @@
 /*
- * ESP32-C3 - SMART AI with Sunrise/Sunset
- * ROOM: Germany (for AI decision)
- * CITY: Kathmandu (for display only)
- * Pins: TX=1, RX=0
+ * ESP32-C3 - Master Controller
+ * FIXED: Forces display update on startup
  */
 
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <time.h>
+#include <Wire.h>
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_GFX.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 #include "secrets.h"
 
-#define TX_PIN 1
-#define RX_PIN 0
+#define SENSOR_INTERVAL         2000
+#define SCREEN_INTERVAL         5000
+#define LIGHT_ON_THRESHOLD      250
+#define LIGHT_OFF_THRESHOLD     350
 
-struct Packet {
-  byte startByte;
-  byte roomHour;
-  byte roomMinute;
-  byte cityHour;
-  byte cityMinute;
-  char cityName[15];
-  byte temperature;
-  byte aiDecision;
-  char weatherCondition[10];
-  byte endByte;
-};
+#define OLED_SDA    5
+#define OLED_SCL    6
+#define OLED_ADDR   0x3C
+#define ONE_WIRE_BUS 7
 
-Packet packet;
+Adafruit_SSD1306 display(128, 64, &Wire, -1);
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
 
-// ==========================================
-// TWO CITIES: Room (Germany) + City (Kathmandu)
-// ==========================================
-String roomCity = "Berlin";      // For AI decision (Germany)
-String displayCity = "Kathmandu"; // For CITY screen display
+bool relayState = false;
+float lastTemperature = 23.5;
+bool tempSensorFound = false;
 
-String weatherCondition = "Loading...";
-float weatherTemp = 0;
-String aiDecision = "OFF";
-String roomTime = "00:00";
-String cityTime = "00:00";
+char roomTime[6] = "--:--";
+char cityName[20] = "Kathmandu";
+char cityTime[6] = "--:--";
+char cityTemp[6] = "--";
+char cityCondition[25] = "Waiting...";
+char lastAIDecision[4] = "---";
 
-// Germany sunrise/sunset for AI
-int sunriseHour = 6;
-int sunriseMinute = 0;
-int sunsetHour = 18;
-int sunsetMinute = 0;
+int screenState = 0;
+unsigned long lastScreenSwitch = 0;
+unsigned long lastSensorRead = 0;
+const char* lightStatusText = "NRM";
+
+int sunriseHour = 6, sunriseMinute = 0;
+int sunsetHour = 18, sunsetMinute = 0;
+
+bool wifiConnected = false;
+bool manualMode = false;
+String ldrStatus = "N";
+String relayStatus = "0";
 
 const long GMT_OFFSET_SEC = 3600;
 const int DAYLIGHT_OFFSET_SEC = 3600;
 
+// ==========================================
+// TRACK LAST DISPLAYED VALUES
+// ==========================================
+String lastDisplayedMode = "";
+
 void setup() {
   Serial.begin(115200);
-  Serial1.begin(9600, SERIAL_8N1, RX_PIN, TX_PIN);
-  delay(2000);
+  Serial1.begin(9600, SERIAL_8N1, 20, 21);
   
-  Serial.println("\n=================================");
-  Serial.println("ESP32-C3 SMART AI - ROOM(Germany) + CITY(Kathmandu)");
-  Serial.println("=================================");
+  Wire.begin(OLED_SDA, OLED_SCL);
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+    while (1);
+  }
+  display.clearDisplay();
+  display.display();
+  
+  sensors.begin();
+  tempSensorFound = (sensors.getDeviceCount() > 0);
   
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("Connecting to WiFi");
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 20) {
     delay(500);
-    Serial.print(".");
     attempts++;
   }
   
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n✅ WiFi connected!");
+    wifiConnected = true;
+    configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, "pool.ntp.org");
+    getWeather();
   } else {
-    Serial.println("\n❌ WiFi failed!");
+    wifiConnected = false;
+    sunriseHour = 6;
+    sunriseMinute = 0;
+    sunsetHour = 18;
+    sunsetMinute = 0;
   }
   
-  configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, "pool.ntp.org");
-  
-  // Get weather for BOTH cities
-  getWeather(roomCity);      // Germany - for AI decision
-  getWeather(displayCity);   // Kathmandu - for display
-  
-  delay(500);
-  getAIDecision();
   getTimes();
+  updateAI();
   
-  Serial.println("✅ Ready!\n");
-  delay(1000);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.print(wifiConnected ? "Ready" : "FALLBACK");
+  display.display();
+  
+  lastScreenSwitch = millis();
+  
+  Serial.println("ESP32 Ready");
 }
 
 void loop() {
-  static unsigned long lastWeatherUpdate = 0;
-  static unsigned long lastSend = 0;
+  unsigned long now = millis();
   
-  if (millis() - lastWeatherUpdate >= 300000) {
-    lastWeatherUpdate = millis();
-    getWeather(roomCity);      // Update Germany weather
-    getWeather(displayCity);   // Update Kathmandu weather
-    getAIDecision();
+  // Check WiFi
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!wifiConnected) {
+      wifiConnected = true;
+      configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, "pool.ntp.org");
+    }
+  } else {
+    if (wifiConnected) {
+      wifiConnected = false;
+    }
   }
   
+  // ==========================================
+  // READ ARDUINO STATUS
+  // ==========================================
+  if (Serial1.available()) {
+    String msg = Serial1.readStringUntil('\n');
+    msg.trim();
+    
+    if (msg.length() >= 5) {
+      ldrStatus = msg.substring(0, 1);
+      manualMode = (msg.substring(2, 3) == "1");
+      relayStatus = msg.substring(4, 5);
+      relayState = (relayStatus == "1");
+      
+      if (ldrStatus == "D") lightStatusText = "DRK";
+      else if (ldrStatus == "B") lightStatusText = "BRT";
+      else lightStatusText = "NRM";
+      
+      // ==========================================
+      // FORCE DISPLAY UPDATE ON STATUS CHANGE
+      // ==========================================
+      String currentMode = manualMode ? "MAN" : (wifiConnected ? "AUTO" : "FALLBACK");
+      if (currentMode != lastDisplayedMode) {
+        lastDisplayedMode = currentMode;
+        updateDisplay();  // Force update
+      }
+      
+      Serial.print("📥 ");
+      Serial.print("LDR:");
+      Serial.print(ldrStatus);
+      Serial.print(" | MAN:");
+      Serial.print(manualMode ? "ON" : "OFF");
+      Serial.print(" | RLY:");
+      Serial.println(relayState ? "ON" : "OFF");
+      
+    }
+  }
+  
+  // Read temperature
+  if (now - lastSensorRead >= SENSOR_INTERVAL) {
+    lastSensorRead = now;
+    if (tempSensorFound) {
+      sensors.requestTemperatures();
+      delay(100);
+      float temp = sensors.getTempCByIndex(0);
+      if (temp != -127.0 && temp < 100) lastTemperature = temp;
+    } else {
+      static float simTemp = 23.5;
+      simTemp += 0.01;
+      if (simTemp > 24.5) simTemp = 22.5;
+      lastTemperature = simTemp;
+    }
+    updateAI();
+    sendRelayCommand();
+  }
+  
+  // Update time
   static unsigned long lastTimeUpdate = 0;
-  if (millis() - lastTimeUpdate >= 30000) {
-    lastTimeUpdate = millis();
+  if (now - lastTimeUpdate >= 5000) {
+    lastTimeUpdate = now;
     getTimes();
-    getAIDecision();
   }
   
-  if (millis() - lastSend >= 5000) {
-    lastSend = millis();
-    sendPacket();
+  // Screen switching
+  if (now - lastScreenSwitch >= SCREEN_INTERVAL) {
+    lastScreenSwitch = now;
+    screenState = (screenState == 0) ? 1 : 0;
+    updateDisplay();  // Force update on screen switch
   }
   
-  delay(100);
+  // Update weather
+  static unsigned long lastWeatherUpdate = 0;
+  if (wifiConnected && (now - lastWeatherUpdate >= 300000)) {
+    lastWeatherUpdate = now;
+    getWeather();
+    updateAI();
+  }
+  
+  // ==========================================
+  // UPDATE DISPLAY EVERY 2 SECONDS (to show changes)
+  // ==========================================
+  static unsigned long lastDisplayUpdate = 0;
+  if (millis() - lastDisplayUpdate >= 2000) {
+    lastDisplayUpdate = millis();
+    updateDisplay();
+  }
+  
+  delay(50);
 }
 
-// ============================================
-// GET WEATHER FOR A SPECIFIC CITY
-// ============================================
-void getWeather(String city) {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("❌ No WiFi!");
+void updateAI() {
+  if (manualMode) {
+    Serial.println("🔧 MANUAL MODE - AI disabled");
     return;
   }
   
+  bool isDark = (ldrStatus == "D");
+  
+  if (!wifiConnected) {
+    strcpy(lastAIDecision, isDark ? "ON" : "OFF");
+    return;
+  }
+  
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    strcpy(lastAIDecision, isDark ? "ON" : "OFF");
+    return;
+  }
+  
+  int current = timeinfo.tm_hour * 60 + timeinfo.tm_min;
+  int sunrise = sunriseHour * 60 + sunriseMinute;
+  int sunset = sunsetHour * 60 + sunsetMinute;
+  
+  bool isNight = (current < sunrise || current >= sunset);
+  strcpy(lastAIDecision, isNight ? "ON" : "OFF");
+  
+  Serial.print("🧠 AI: ");
+  Serial.println(lastAIDecision);
+}
+
+void sendRelayCommand() {
+  if (manualMode) {
+    return;
+  }
+  
+  static char lastSent[4] = "";
+  if (strcmp(lastAIDecision, lastSent) != 0) {
+    strcpy(lastSent, lastAIDecision);
+    Serial1.println(lastAIDecision);
+    Serial.print("📤 Sent: ");
+    Serial.println(lastAIDecision);
+  }
+}
+
+void getWeather() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  
   String url = "http://api.openweathermap.org/data/2.5/weather?q=" + 
-               city + "&units=metric&appid=" + OPENWEATHER_API_KEY;
+               String(cityName) + "&units=metric&appid=" + OPENWEATHER_API_KEY;
   
   HTTPClient http;
   http.begin(url);
@@ -132,270 +267,107 @@ void getWeather(String city) {
   
   if (httpCode == HTTP_CODE_OK) {
     String payload = http.getString();
-    DynamicJsonDocument doc(1024);
+    JsonDocument doc;
     deserializeJson(doc, payload);
     
-    // ==========================================
-    // IF THIS IS GERMANY (roomCity) - Get sunrise/sunset for AI
-    // ==========================================
-    if (city == roomCity) {
-      long sunriseUnix = doc["sys"]["sunrise"];
-      long sunsetUnix = doc["sys"]["sunset"];
-      long timezoneOffset = doc["timezone"].as<long>();
-      
-      long sunriseLocal = sunriseUnix + timezoneOffset;
-      long sunsetLocal = sunsetUnix + timezoneOffset;
-      
-      long sunriseSeconds = sunriseLocal % 86400;
-      long sunsetSeconds = sunsetLocal % 86400;
-      
-      sunriseHour = sunriseSeconds / 3600;
-      sunriseMinute = (sunriseSeconds % 3600) / 60;
-      sunsetHour = sunsetSeconds / 3600;
-      sunsetMinute = (sunsetSeconds % 3600) / 60;
-      
-      Serial.println("=================================");
-      Serial.println("🇩🇪 GERMANY (Room) - Sunrise/Sunset for AI:");
-      Serial.print("   City: ");
-      Serial.println(city);
-      Serial.print("   Sunrise: ");
-      Serial.print(sunriseHour);
-      Serial.print(":");
-      if (sunriseMinute < 10) Serial.print("0");
-      Serial.println(sunriseMinute);
-      Serial.print("   Sunset: ");
-      Serial.print(sunsetHour);
-      Serial.print(":");
-      if (sunsetMinute < 10) Serial.print("0");
-      Serial.println(sunsetMinute);
-      
-      int dayLengthMinutes = (sunsetHour * 60 + sunsetMinute) - (sunriseHour * 60 + sunriseMinute);
-      if (dayLengthMinutes < 0) dayLengthMinutes += 1440;
-      Serial.print("   Day length: ");
-      Serial.print(dayLengthMinutes / 60);
-      Serial.print("h ");
-      Serial.print(dayLengthMinutes % 60);
-      Serial.println("m");
-      Serial.println("=================================");
-    }
+    float temp = doc["main"]["temp"];
+    dtostrf(temp, 4, 1, cityTemp);
+    String cond = doc["weather"][0]["description"].as<String>();
+    if (cond.length() > 10) cond = cond.substring(0, 10);
+    strcpy(cityCondition, cond.c_str());
     
-    // ==========================================
-    // IF THIS IS KATHMANDU (displayCity) - Get weather for display
-    // ==========================================
-    if (city == displayCity) {
-      weatherTemp = doc["main"]["temp"];
-      weatherCondition = doc["weather"][0]["description"].as<String>();
-      
-      if (weatherCondition.length() > 10) {
-        weatherCondition = weatherCondition.substring(0, 10);
-      }
-      
-      Serial.print("🇳🇵 KATHMANDU (City) - Weather: ");
-      Serial.print(weatherTemp);
-      Serial.print("°C - ");
-      Serial.println(weatherCondition);
-    }
+    long tz = doc["timezone"].as<long>();
+    long sr = doc["sys"]["sunrise"].as<long>() + tz;
+    long ss = doc["sys"]["sunset"].as<long>() + tz;
     
-  } else {
-    Serial.print("❌ Weather API error for ");
-    Serial.print(city);
-    Serial.print(": ");
-    Serial.println(httpCode);
-    
-    // Fallback for Germany
-    if (city == roomCity) {
-      sunriseHour = 5;
-      sunriseMinute = 0;
-      sunsetHour = 21;
-      sunsetMinute = 30;
-    }
-    // Fallback for Kathmandu
-    if (city == displayCity) {
-      weatherTemp = 22.5;
-      weatherCondition = "Clear sky";
-    }
+    sunriseHour = (sr % 86400) / 3600;
+    sunriseMinute = ((sr % 86400) % 3600) / 60;
+    sunsetHour = (ss % 86400) / 3600;
+    sunsetMinute = ((ss % 86400) % 3600) / 60;
   }
-  
   http.end();
 }
 
-// ============================================
-// SMART AI DECISION - Based on GERMANY times
-// ============================================
-void getAIDecision() {
-  struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) {
-    aiDecision = "OFF";
-    return;
-  }
-  
-  int currentHour = timeinfo.tm_hour;
-  int currentMinute = timeinfo.tm_min;
-  
-  int currentMinutes = currentHour * 60 + currentMinute;
-  int sunriseMinutes = sunriseHour * 60 + sunriseMinute;
-  int sunsetMinutes = sunsetHour * 60 + sunsetMinute;
-  
-  // ==========================================
-  // Daytime/Nighttime detection using GERMANY times
-  // ==========================================
-  bool isDaytime = false;
-  
-  if (sunriseMinutes < sunsetMinutes) {
-    if (currentMinutes >= sunriseMinutes && currentMinutes < sunsetMinutes) {
-      isDaytime = true;
-    }
-  } else {
-    if (currentMinutes >= sunriseMinutes || currentMinutes < sunsetMinutes) {
-      isDaytime = true;
-    }
-  }
-  
-  // ==========================================
-  // 30-minute buffer for smooth transitions
-  // ==========================================
-  int duskStart = sunsetMinutes - 30;
-  int dawnEnd = sunriseMinutes + 30;
-  
-  if (duskStart < 0) duskStart += 1440;
-  if (dawnEnd > 1440) dawnEnd -= 1440;
-  
-  bool isDusk = false;
-  bool isDawn = false;
-  
-  if (sunsetMinutes > sunriseMinutes) {
-    if (currentMinutes >= sunsetMinutes - 30 && currentMinutes < sunsetMinutes) {
-      isDusk = true;
-    }
-    if (currentMinutes >= sunriseMinutes && currentMinutes < sunriseMinutes + 30) {
-      isDawn = true;
-    }
-  }
-  
-  if (isDusk) {
-    aiDecision = "ON";
-    Serial.println("🌆 DUSK (30min before sunset) - AI: ON");
-  } else if (isDawn) {
-    aiDecision = "OFF";
-    Serial.println("🌅 DAWN (30min after sunrise) - AI: OFF");
-  } else if (isDaytime) {
-    aiDecision = "OFF";
-    Serial.print("☀️ GERMANY DAYTIME (");
-    Serial.print(currentHour);
-    Serial.print(":");
-    if (currentMinute < 10) Serial.print("0");
-    Serial.print(currentMinute);
-    Serial.print(") - Sunrise: ");
-    Serial.print(sunriseHour);
-    Serial.print(":");
-    if (sunriseMinute < 10) Serial.print("0");
-    Serial.print(sunriseMinute);
-    Serial.print(" - Sunset: ");
-    Serial.print(sunsetHour);
-    Serial.print(":");
-    if (sunsetMinute < 10) Serial.print("0");
-    Serial.print(sunsetMinute);
-    Serial.println(" → AI: OFF");
-  } else {
-    aiDecision = "ON";
-    Serial.print("🌙 GERMANY NIGHTTIME (");
-    Serial.print(currentHour);
-    Serial.print(":");
-    if (currentMinute < 10) Serial.print("0");
-    Serial.print(currentMinute);
-    Serial.print(") - Sunrise: ");
-    Serial.print(sunriseHour);
-    Serial.print(":");
-    if (sunriseMinute < 10) Serial.print("0");
-    Serial.print(sunriseMinute);
-    Serial.print(" - Sunset: ");
-    Serial.print(sunsetHour);
-    Serial.print(":");
-    if (sunsetMinute < 10) Serial.print("0");
-    Serial.print(sunsetMinute);
-    Serial.println(" → AI: ON");
-  }
-}
-
-// ============================================
-// GET TIMES
-// ============================================
 void getTimes() {
   struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) {
-    roomTime = "00:00";
-    cityTime = "00:00";
-    return;
+  if (getLocalTime(&timeinfo)) {
+    strftime(roomTime, 6, "%H:%M", &timeinfo);
+  } else {
+    strcpy(roomTime, "--:--");
   }
   
-  char buffer[6];
-  strftime(buffer, sizeof(buffer), "%H:%M", &timeinfo);
-  roomTime = String(buffer);  // Germany time (Room)
-  
-  // Kathmandu time (UTC+5:45) - for City display
   time_t now;
   time(&now);
-  struct tm* utcTime = gmtime(&now);
-  
-  int hours = utcTime->tm_hour + 5;
-  int minutes = utcTime->tm_min + 45;
-  
-  if (minutes >= 60) { minutes -= 60; hours += 1; }
-  if (hours >= 24) { hours -= 24; }
-  
-  sprintf(buffer, "%02d:%02d", hours, minutes);
-  cityTime = String(buffer);  // Kathmandu time (City)
+  struct tm* utc = gmtime(&now);
+  int h = utc->tm_hour + 5;
+  int m = utc->tm_min + 45;
+  if (m >= 60) { m -= 60; h += 1; }
+  if (h >= 24) h -= 24;
+  sprintf(cityTime, "%02d:%02d", h, m);
 }
 
-// ============================================
-// SEND BINARY PACKET
-// ============================================
-void sendPacket() {
-  packet.startByte = 0xAA;
+void updateDisplay() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
   
-  // Room = Germany time
-  packet.roomHour = roomTime.substring(0, 2).toInt();
-  packet.roomMinute = roomTime.substring(3, 5).toInt();
-  
-  // City = Kathmandu time
-  packet.cityHour = cityTime.substring(0, 2).toInt();
-  packet.cityMinute = cityTime.substring(3, 5).toInt();
-  
-  // City name for display
-  memset(packet.cityName, 0, sizeof(packet.cityName));
-  for (int i = 0; i < 14 && i < displayCity.length(); i++) {
-    packet.cityName[i] = displayCity[i];
+  if (screenState == 0) {
+    display.setCursor(0, 0);
+    display.print("ROOM");
+    if (roomTime[0] != '-') {
+      display.setCursor(85, 0);
+      display.print(roomTime);
+    }
+    
+    display.setTextSize(2);
+    display.setCursor(0, 18);
+    display.print(lastTemperature, 1);
+    display.print("C");
+    
+    display.setTextSize(1);
+    display.setCursor(0, 44);
+    display.print("L:");
+    display.print(lightStatusText);
+    display.setCursor(55, 44);
+    display.print("R:");
+    display.print(relayState ? "ON" : "OFF");
+    
+    display.setCursor(0, 54);
+    display.print("AI:");
+    display.print(lastAIDecision);
+    display.setCursor(55, 54);
+    
+    if (manualMode) {
+      display.print("MAN");
+    } else if (!wifiConnected) {
+      display.print("FALLBACK");
+    } else {
+      display.print("AUTO");
+    }
+    
+  } else {
+    display.setCursor(0, 0);
+    display.print(cityName);
+    if (cityTime[0] != '-') {
+      int x = 128 - (strlen(cityTime) * 6);
+      display.setCursor(x, 0);
+      display.print(cityTime);
+    }
+    
+    display.setTextSize(2);
+    display.setCursor(0, 22);
+    if (cityTemp[0] != '-' && cityTemp[0] != '\0') {
+      display.print(cityTemp);
+    } else {
+      display.print("--");
+    }
+    display.print("C");
+    
+    display.setTextSize(1);
+    display.setCursor(0, 46);
+    display.print(cityCondition);
+    display.setCursor(0, 58);
+    display.print(wifiConnected ? "ESP32" : "OFFLINE");
   }
-  packet.cityName[14] = '\0';
-  
-  // Kathmandu weather for display
-  packet.temperature = (byte)(weatherTemp * 10);
-  packet.aiDecision = (aiDecision == "ON") ? 1 : 0;
-  
-  memset(packet.weatherCondition, 0, sizeof(packet.weatherCondition));
-  for (int i = 0; i < 9 && i < weatherCondition.length(); i++) {
-    packet.weatherCondition[i] = weatherCondition[i];
-  }
-  packet.weatherCondition[9] = '\0';
-  
-  if (packet.weatherCondition[0] == '\0' || packet.weatherCondition[0] == ' ') {
-    strcpy(packet.weatherCondition, "Clear sky");
-  }
-  
-  packet.endByte = 0xBB;
-  
-  Serial1.write((byte*)&packet, sizeof(packet));
-  
-  Serial.print("📤 Sent: Room(Germany): ");
-  Serial.print(roomTime);
-  Serial.print(" | City(Kathmandu): ");
-  Serial.print(cityTime);
-  Serial.print(" | ");
-  Serial.print(displayCity);
-  Serial.print(": ");
-  Serial.print(weatherTemp);
-  Serial.print("°C ");
-  Serial.print(weatherCondition);
-  Serial.print(" | AI: ");
-  Serial.println(packet.aiDecision ? "ON" : "OFF");
+  display.display();
 }
